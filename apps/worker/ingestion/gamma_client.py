@@ -1,137 +1,87 @@
-import requests
-from pydantic import BaseModel,ValidationError, validator
+import httpx
 import json
+import logging
 from datetime import datetime
-import asyncio
+from typing import List, Optional
+from pydantic import BaseModel, Field, validator
 
-base_url = "https://gamma-api.polymarket.com/"
+logger = logging.getLogger("Ingestion.Gamma")
+BASE_URL = "https://gamma-api.polymarket.com"
 
-endpoint = "markets?status=open&order=id&ascending=false&closed=false"
+# --- 1. Define the Schema (The Zleek way) ---
+class MarketRow(BaseModel):
+    id: str
+    title: str = Field(alias="question")
+    condition_id: str = Field(alias="conditionId")
+    category: str = "Uncategorized"
+    status: str = "open"
+    liquidity_usd: float = Field(alias="liquidityNum", default=0.0)
+    token_yes_id: Optional[str] = None
+    token_no_id: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    raw: str
 
-
-
-print("Starting")
-'''
-class Market(BaseModel):
-    id: str 
-    title: str
-    category: str | None = None
-    status: str | None = 'open'
-    liquidity: int | None
-    token_yes_id: str | None
-    token_no_id: str | None
-    created_at: str | None
-    updated_at: str | None
-    raw: str | None
-    
-    '''
-
-def fetch_markets(limit=200):
-    """
-    Fetch the list of markets from the Gamma API.
-
-    Returns:
-        dict: The response from the Gamma API in JSON format.
-    """
-    offset = 0
-    all_items = []
-    while True:
-        lim_and_off = f"&limit={limit}&offset={offset}"
-        url = base_url + endpoint + lim_and_off
-
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        items = data
-        
-        if not items:
-            break
-        
-        all_items.extend(data)
-
-
-    
-        offset += limit
-    return all_items
-def parse_json(response):
-    rows = []
-    for m in response:
-      
-        
-        token_ids = m.get("clobTokenIds","")
-        ids = []
-        if isinstance(token_ids, list):
-            # already parsed
-            ids = token_ids
-        elif isinstance(token_ids, str) and token_ids.strip():
+    @validator("token_yes_id", pre=True, always=True)
+    def parse_token_ids(cls, v, values, **kwargs):
+        # This handles the complex logic you had in parse_json
+        # 'v' is the value of the field being validated
+        raw_ids = kwargs.get("data").get("clobTokenIds")
+        if isinstance(raw_ids, str) and raw_ids.strip():
             try:
-                ids = json.loads(token_ids)
-            except json.JSONDecodeError:
-                ids = []
-        else:
-            ids = []
+                ids = json.loads(raw_ids)
+                if len(ids) == 2:
+                    # Logic: yes is usually index 1, no is index 0
+                    return ids[1] 
+            except:
+                pass
+        return None
 
-        if isinstance(ids, list) and len(ids) == 2:
-            no_id, yes_id = ids
-        else:
-            no_id = yes_id = None
-            
-        events = m.get("events") or []
-        first_event = events[0] if events else {}
-        created_raw = m.get("createdAt")
-        updated_raw = m.get("updatedAt")
-        
-        char = {
-            'id': m.get('id',""),
-            'title': m.get('question',""), 
-            'condition_id': m.get('conditionId',""),
-            'event_id': first_event.get("id", ""),
-            'event_title': first_event.get("title", ""),
-            'category': m.get("category") or "Uncategorized",
-            'status': "open" if m.get('active') else "close",
-            'liquidity_usd': m.get("liquidityNum",0),
-            'token_yes_id': yes_id if len(ids) == 2 else "" ,
-            'token_no_id': no_id if len(ids) == 2 else "",
-            'created_at': datetime.strptime(created_raw, "%Y-%m-%dT%H:%M:%S.%f%z") if created_raw else None,
-            'updated_at': datetime.strptime(updated_raw, "%Y-%m-%dT%H:%M:%S.%f%z") if updated_raw else None,
-            'raw': json.dumps(m)
-            
-        }
-        rows.append(char)
-
-        print (char.get("updated_at"))
-
-    
-    return rows
-    
-def fetch_trades(limit=200):
+# --- 2. The Async Fetcher ---
+async def fetch_markets(min_liquidity=10000, min_volume=1000) -> List[dict]:
+    all_raw_markets = []
     offset = 0
-    all_items = []
-    end = "trades?status=open&order=id&ascending=false&closed=false"
-    while True:
-        lim_and_off = f"&limit={limit}&offset={offset}"
-        url = base_url + end + lim_and_off
-
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        items = data
-        
-        if not items:
-            break
-        
-        all_items.extend(data)
-
-
+    limit = 100
     
-        offset += limit
-    return all_items
-    
-        
+    # Using AsyncClient as a context manager is more efficient for multiple calls
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:
+        while True:
+            params = {
+                "active": "true",
+                "closed": "false",
+                "liquidity_num_min": min_liquidity,
+                "volume_num_min": min_volume,
+                "order": "volume24hr",
+                "ascending": "false",
+                "limit": limit,
+                "offset": offset
+            }
+            
+            try:
+                response = await client.get("/markets", params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data:
+                    break
+                    
+                all_raw_markets.extend(data)
+                offset += limit
+                logger.info(f"Fetched {len(all_raw_markets)} markets so far...")
+                
+            except Exception as e:
+                logger.error(f"Error fetching from Gamma: {e}")
+                break
+                
+    return all_raw_markets
 
-
-if __name__ == "__main__":
-    markets = fetch_markets()
-    rows = parse_json(markets)
+# --- 3. The Parser ---
+def parse_markets(raw_data: List[dict]) -> List[dict]:
+    rows = []
+    for m in raw_data:
+        try:
+            # We use Pydantic to do the heavy lifting of date parsing and ID extraction
+            market_obj = MarketRow(**m, raw=json.dumps(m))
+            rows.append(market_obj.dict())
+        except Exception as e:
+            logger.warning(f"Skipping market {m.get('id')} due to parse error: {e}")
+    return rows

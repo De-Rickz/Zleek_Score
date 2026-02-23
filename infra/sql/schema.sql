@@ -48,3 +48,4 @@ create table if not exists bars_1m(
   volume_usd numeric,
   primary key (market_id, ts)
 );
+ 

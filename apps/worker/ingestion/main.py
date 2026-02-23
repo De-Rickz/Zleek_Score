@@ -2,11 +2,12 @@ from dotenv import load_dotenv
 import asyncpg
 import asyncio
 import os
-from writer import insert_trades_and_books, upsert_markets
+from writer import insert_trades_and_books, upsert_markets, run_backfill_loop, run_backfill
 from clob_ws import subscribe
 import gamma_client
 import logging
 import sys
+from bars_jobs import run_bars_job
 
 load_dotenv(".env.local")
 uri = os.getenv("DATABASE_URL")
@@ -32,7 +33,7 @@ async def refresh_markets_periodically(pool, interval=600):
     while True:
         try:
             # 1) Fetch + parse markets from Gamma
-            raw = gamma_client.fetch_markets()  # sync HTTP call
+            raw = await gamma_client.fetch_markets()  # sync HTTP call
             logger.info("Fetched %d raw markets from Gamma", len(raw))
             
             markets = gamma_client.parse_json(raw)
@@ -47,6 +48,15 @@ async def refresh_markets_periodically(pool, interval=600):
         
         # 3) Sleep before next refresh
         await asyncio.sleep(interval)
+        
+async def run_bars_loop(pool, interval=60):
+    while True:
+        try:
+            await run_bars_job(pool)
+        except Exception as e:
+            logger.exception("Bars job failed: %s", e)
+        await asyncio.sleep(interval)
+
 
 
 async def main():
@@ -68,11 +78,19 @@ async def main():
         command_timeout=60
     )
     
-    # Create queue for passing events from subscriber to writer
+    # Create queue for passing events from subscriber to writer 
     queue = asyncio.Queue(maxsize=5000)
     
     async with pool:
         logger.info("Database pool created successfully")
+        
+          # 1. Run large initial backfill (24 hours)
+        try:
+            logger.info("Running initial 24-hour backfill...")
+            await run_backfill(pool, queue, hours_back=24)
+            logger.info("Initial backfill completed")
+        except Exception as e:
+            logger.error("Initial backfill failed: %s", e, exc_info=True)
         
         # Create all tasks
         writer_task = asyncio.create_task(
@@ -83,9 +101,20 @@ async def main():
             subscribe(queue, pool),
             name="clob_subscriber"
         )
+        
+        bars_task = asyncio.create_task(
+            run_bars_loop(pool),
+            name="bars_job"
+        )
         gamma_task = asyncio.create_task(
             refresh_markets_periodically(pool, interval=600),
             name="gamma_refresher"
+        )
+        
+        # Periodic small backfills every hour (just last hour)
+        backfill_task = asyncio.create_task(
+            run_backfill_loop(pool, queue, interval=300, hours_back=1),
+            name="backfill_loop"
         )
         
         logger.info("All tasks started. Running indefinitely...")
@@ -93,7 +122,7 @@ async def main():
         # Wait for any task to complete (or crash)
         # In practice, these tasks run forever unless there's an unhandled error
         done, pending = await asyncio.wait(
-            [writer_task, clob_task, gamma_task],
+            [writer_task, clob_task,bars_task, gamma_task, backfill_task],
             return_when=asyncio.FIRST_COMPLETED
         )
         
@@ -112,7 +141,7 @@ async def main():
         
         # Wait for cancellation to complete
         await asyncio.gather(*pending, return_exceptions=True)
-        
+        3
         logger.error("Application shutting down due to task failure")
         raise SystemExit(1)
 

@@ -5,18 +5,35 @@ import os
 import json
 import gamma_client
 from py_clob_client.clob_types import TradeParams
-from clob_client import client
+from clob_client import get_client
 from datetime import datetime, timezone,timedelta
+from collections import deque
+import statistics
 
 
 logger = logging.getLogger(__name__)
 
+
+clob = get_client()
 load_dotenv(".env.local")
 uri = os.getenv("DATABASE_URL")
-MIN_LIQUIDITY_USD = 20000
-MAX_MARKETS = 10
-BATCH=500
+MIN_LIQUIDITY_USD = 10000
+MAX_MARKETS = 20
+BATCH=5000
 SNAPSHOT_THROTTLE_SEC=5
+write_lags = deque(maxlen=200)
+write_lag_counter = 0
+
+
+def coerce_dt(value):
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 async def upsert_markets(pool,data):
@@ -57,14 +74,32 @@ async def upsert_markets(pool,data):
             await conn.executemany(query, rows)
 
 async def insert_trades_and_books(pool, queue: asyncio.Queue):
-    trades_query = """
-    insert into trades(id, market_id, asset_id, ts, price, size_usd, side, maker_wallet,
-                        taker_wallet, tx_hash, raw, status, asset_id, market_order_id, match_time)
+    # Query for REST API trades (has tx_hash, id, etc.)
+    rest_trades_query = """
+    insert into trades(id, market_id, asset_id, ts, price, size_usd, side, 
+                       maker_wallet, taker_wallet, tx_hash, raw, status, 
+                       market_order_id, match_time)
     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
     on conflict (tx_hash) do update
-      set id=$1, market_id=$2, ts=$3, price=$4, size_usd=$5, side=$6,
-          maker_wallet=$7, taker_wallet=$8, tx_hash=$9, 
-          raw=$10, status=$11, asset_id=$12, market_order_id=$13, match_time=$14 ;
+      set id=excluded.id,
+          market_id=excluded.market_id,
+          asset_id=excluded.asset_id,
+          ts=excluded.ts,
+          price=excluded.price,
+          size_usd=excluded.size_usd,
+          side=excluded.side,
+          maker_wallet=excluded.maker_wallet,
+          taker_wallet=excluded.taker_wallet,
+          raw=excluded.raw,
+          status=excluded.status,
+          market_order_id=excluded.market_order_id,
+          match_time=excluded.match_time
+    """
+    
+    # Query for WebSocket trades (simpler, no unique IDs)
+    ws_trades_query = """
+    insert into trades(market_id, asset_id, ts, price, size_usd, side, raw)
+    values ($1,$2,$3,$4,$5,$6,$7)
     """
     
     ob_snapshot_query = """
@@ -75,65 +110,84 @@ async def insert_trades_and_books(pool, queue: asyncio.Queue):
       set market_id=$1, ts=$2, best_ask=$3, best_bid=$4, bid_depth_usd=$5,
           ask_depth_usd=$6, bids=$7, asks=$8
     """
+    
     last_snapshot = {}
+    
+    global write_lag_counter
     while True:
         batch = []
-        # drain quickly up to BATCH
-        
         
         try:
             item = await asyncio.wait_for(queue.get(), timeout=1.0)
             batch.append(item)
         except asyncio.TimeoutError:
-         
             pass
+            
         while len(batch) < BATCH:
             try:
                 batch.append(queue.get_nowait())
             except asyncio.QueueEmpty:
-                logger.debug("Queue empty while building batch")
                 break
+                
         if not batch:
             continue
         
-        trades = []
+        rest_trades = []  # From REST API backfill
+        ws_trades = []    # From WebSocket
         snaps = []
         now = datetime.now(timezone.utc)
+        
         try:   
-            
             for e in batch:
-                logger.debug("Processing %s event", e["kind"])
                 kind = e.get("kind")
+                ingest_dt = coerce_dt(e.get("ingest_ts"))
+                if ingest_dt:
+                    write_lag_ms = (now - ingest_dt).total_seconds() * 1000
+                    write_lags.append(write_lag_ms)
+                    write_lag_counter += 1
+                    if write_lag_counter % 200 == 0 and write_lags:
+                        p50 = statistics.median(write_lags)
+                        p95 = sorted(write_lags)[int(0.95 * len(write_lags))]
+                        logger.info("write lag p50=%.0fms p95=%.0fms", p50, p95)
+                
                 if kind == "trade":
-                    logger.info("Writing trade %s", e.get("tx_hash"))
-                    row = (
-                            e.get("market_id",""),
-                            e.get("asset_id",""),
+                    # Detect source: REST API trades have tx_hash, WS trades don't
+                    if e.get("tx_hash"):
+                        # REST API trade
+                        row = (
+                            e.get("id", ""),
+                            e.get("market_id", ""),
+                            e.get("asset_id", ""),
                             e.get("ts", ""),
                             e.get("price", 0),
                             e.get("size_usd", 0),
-                            e.get("side",""),
+                            e.get("side", ""),
                             e.get("maker_wallet", ""),
-                            e.get("taker_wallet",""),
-                            e.get("tx_hash",""),
-                            e.get("status",""),
-                            e.get("raw",""),
-                            e.get("bucket_index",-1),
-                            e.get("match_time", ""),
-                            e.get("id",""),
-                            e.get("market_order_id","")
-                        ) 
-                    trades.append(row)
-                    
-            
-                            
-
+                            e.get("taker_wallet", ""),
+                            e.get("tx_hash", ""),
+                            e.get("raw", ""),
+                            e.get("status", ""),
+                            e.get("market_order_id", ""),
+                            e.get("match_time", "")
+                        )
+                        rest_trades.append(row)
+                    else:
+                        # WebSocket trade
+                        row = (
+                            e.get("market_id", ""),
+                            e.get("asset_id", ""),
+                            e.get("ts", ""),
+                            e.get("price", 0),
+                            e.get("size_usd", 0),
+                            e.get("side", ""),
+                            e.get("raw", ""),
+                        )
+                        ws_trades.append(row)
+                
                 elif kind == "book":
-                    key = (e["market_id"])
-                    #throttle snapshots per market
+                    key = e["market_id"]
                     ts_prev = last_snapshot.get(key)
                     
-                    logger.info("Writing book snapshot for %s", e.get("market_id"))
                     row = (
                         e.get("market_id", ""),
                         e.get("ts", ""),
@@ -144,35 +198,37 @@ async def insert_trades_and_books(pool, queue: asyncio.Queue):
                         e.get("bids", []),
                         e.get("asks", []),
                     )
+                    
                     if not ts_prev or (now-ts_prev).total_seconds() >= SNAPSHOT_THROTTLE_SEC:
                         snaps.append(row)
                         last_snapshot[key] = now
-                else:
-                    
-                    pass
+            
             async with pool.acquire() as conn:
-                if trades:
+                if rest_trades:
                     async with conn.transaction():
-                        await conn.executemany(trades_query, trades)
-                        logger.info("Trades stored")    
+                        await conn.executemany(rest_trades_query, rest_trades)
+                        logger.info("Stored %d REST API trades", len(rest_trades))
+                
+                if ws_trades:
+                    async with conn.transaction():
+                        await conn.executemany(ws_trades_query, ws_trades)
+                        logger.info("Stored %d WebSocket trades", len(ws_trades))
+                
                 if snaps:
                     async with conn.transaction():
                         await conn.executemany(ob_snapshot_query, snaps)
-                        logger.info("Books stored")    
-                
-                        # unknown kind: drop or log
-                    pass
+                        logger.info("Stored %d book snapshots", len(snaps))
+        
         except Exception as e:
-            logger.error("DB write error: %s", e)
+            logger.error("DB write error: %s", e, exc_info=True)
         finally:
             for _ in batch:
                 queue.task_done()
-                logger.info("Marked %d tasks done", len(batch))
 
 async def load_asset_ids(pool):
     logger.info("Load asset IDs started")
     query = """
-        select token_yes_id, token_no_id
+              select token_yes_id, token_no_id
             from markets
             where status = 'open'
               and liquidity_usd >= $1
@@ -193,7 +249,7 @@ async def load_asset_ids(pool):
             asset_ids.add(r["token_no_id"])
             
     list_ids = list(asset_ids)
-    logger.info("Returning asset %d IDs",len(list_ids))
+    logger.info("Returning %d assets , im requiring a minimum liquidity of %f",len(list_ids), MIN_LIQUIDITY_USD)
     return list_ids
 
     # load mapping once at startup
@@ -225,7 +281,7 @@ def parse_iso_z(s: str) -> datetime:
 async def load_condition_ids_for_backfill(pool):
     logger.info("Load condition IDs started")
     query = """
-        select distinct condition_id
+        select distinct condition_id, liquidity_usd
         from markets
         where status = 'open'
           and liquidity_usd >= $1
@@ -242,62 +298,100 @@ async def load_condition_ids_for_backfill(pool):
     logger.info("Returning %d condition IDs for backfill", len(condition_ids))
     return condition_ids
 
-async def run_backfill(pool,queue):
+async def run_backfill(pool, queue, hours_back=1):
+    """
+    Backfill trades from the last `hours_back` hours.
+    This function should be called periodically by a wrapper.
+    """
     t_now = datetime.now(timezone.utc)
-    t_start = t_now - timedelta(hours=1)
+    t_start = t_now - timedelta(hours=hours_back)  # FIX: Add timedelta()
     cutoff_unix = int(t_start.timestamp())
+    
     condition_ids = await load_condition_ids_for_backfill(pool)
     if not condition_ids:
         logger.info("No condition_ids available for backfill")
         return
     
+    total_trades = 0
+    
+    # FIX: Process each condition properly
     for cond in condition_ids:
-        logger.info("Backfilling trades for condition_id=%s", cond) 
-        resp = client.get_trades(
-        TradeParams(
-            market=cond,
-            after=str(cutoff_unix)
-        ),
-    )
-    backfill_norm_trades = []
-
-    
-    for trade in resp:
-        mt = parse_iso_z(trade["match_time"])
-        if mt < t_start:
-            # defensive, although 'after' should already filter these out
-            continue
+        logger.info("Backfilling trades for condition_id=%s", cond)
         
-        norm = {
-                "kind": "trade",
-                "id": trade.get("id"),
-                "market_id": trade.get("market_id"),
-                "price": float(trade.get("price", 0)),
-                "ts": mt.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-                "asset_id": trade.get("asset_id"),
-                "match_time": mt,        
-                "market_order_id": trade.get("market_order_id"),
-                "size_usd": float(trade.get("size",0)),
-                "side": trade.get("side"),    # "buy"/"sell" for YES
-                "maker_wallet": trade.get("maker_address"),
-                "taker_wallet": None,
-                "tx_hash": trade.get("transaction_hash"),
-                "status": trade.get("status"),
-                "bucket_index" : trade.get("bucket_index"),
-                "raw": trade
-        }
-        backfill_norm_trades.append(norm)
-    logger.info("Backfill produced %d trades", len(backfill_norm_trades))
-    for t in backfill_norm_trades:
         try:
-            queue.put_nowait(t)
-        except asyncio.QueueFull:
-            _ = queue.get_nowait()
-            queue.put_nowait(t)
+            resp = clob.get_trades(
+                TradeParams(
+                    market=cond,
+                    after=str(cutoff_unix)
+                )
+            )
+            
+            # FIX: This loop must be INSIDE the condition loop
+            for trade in resp:
+                mt = parse_iso_z(trade["match_time"])
+                if mt < t_start:
+                    continue
+                
+                norm = {
+                    "kind": "trade",
+                    "id": trade.get("id"),
+                    "market_id": trade.get("market_id"),
+                    "price": float(trade.get("price", 0)),
+                    "ts": mt,  # FIX: Keep as datetime object, not string
+                    "asset_id": trade.get("asset_id"),
+                    "match_time": mt,        
+                    "market_order_id": trade.get("market_order_id"),
+                    "size_usd": float(trade.get("size", 0)),
+                    "side": trade.get("side"),
+                    "maker_wallet": trade.get("maker_address"),
+                    "taker_wallet": None,
+                    "tx_hash": trade.get("transaction_hash"),
+                    "status": trade.get("status"),
+                    "bucket_index": trade.get("bucket_index"),
+                    "raw": json.dumps(trade)  # FIX: Convert to JSON string
+                }
+                
+                # Enqueue immediately
+                try:
+                    queue.put_nowait(norm)
+                    total_trades += 1
+                except asyncio.QueueFull:
+                    _ = queue.get_nowait()
+                    queue.put_nowait(norm)
+                    
+        except Exception as e:
+            logger.error("Error backfilling condition %s: %s", cond, e, exc_info=True)
+            continue
     
+    logger.info("Backfill completed: %d trades from %d conditions", 
+                total_trades, len(condition_ids))
+    
+    if total_trades > 0:
+        logger.info("✅ Recent trades exist!")
+    else:
+        logger.warning("⚠️ No trades in last %d hour(s) for selected markets", hours_back)
         
-       
+async def run_backfill_loop(pool, queue, interval=3600, hours_back=1):
+    """
+    Periodically run backfill to catch any missed trades.
+    Runs every `interval` seconds.
     
+    Note: This does NOT run an initial backfill - that should be done
+    in main() before starting this task.
+    """
+    logger.info("Starting backfill loop every %s seconds (looking back %s hours)", 
+                interval, hours_back)
+    
+    while True:
+        await asyncio.sleep(interval)
+        
+        try:
+            logger.info("Running periodic backfill (last %s hour(s))...", hours_back)
+            await run_backfill(pool, queue, hours_back=hours_back)
+            logger.info("Periodic backfill completed")
+        except Exception as e:
+            logger.exception("Periodic backfill failed: %s", e)    
+
      
 async def main():
 
