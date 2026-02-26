@@ -3,7 +3,8 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, Field, validator
+# 🚀 Change: Import root_validator instead of validator
+from pydantic import BaseModel, Field, root_validator 
 
 logger = logging.getLogger("Ingestion.Gamma")
 BASE_URL = "https://gamma-api.polymarket.com"
@@ -21,20 +22,20 @@ class MarketRow(BaseModel):
     updated_at: Optional[datetime] = None
     raw: str
 
-    @validator("token_yes_id", pre=True, always=True)
-    def parse_token_ids(cls, v, values, **kwargs):
-        # This handles the complex logic you had in parse_json
-        # 'v' is the value of the field being validated
-        raw_ids = kwargs.get("data").get("clobTokenIds")
+    # 🚀 Change: Use root_validator to safely check the whole dictionary at once
+    @root_validator(pre=True)
+    def parse_token_ids(cls, values):
+        raw_ids = values.get("clobTokenIds")
         if isinstance(raw_ids, str) and raw_ids.strip():
             try:
                 ids = json.loads(raw_ids)
                 if len(ids) == 2:
-                    # Logic: yes is usually index 1, no is index 0
-                    return ids[1] 
-            except:
+                    # Inject both IDs safely into the model
+                    values["token_no_id"] = ids[0]
+                    values["token_yes_id"] = ids[1] 
+            except Exception:
                 pass
-        return None
+        return values
 
 # --- 2. The Async Fetcher ---
 async def fetch_markets(min_liquidity=10000, min_volume=1000) -> List[dict]:

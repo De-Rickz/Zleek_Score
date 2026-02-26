@@ -2,15 +2,17 @@ from dotenv import load_dotenv
 import asyncpg
 import asyncio
 import os
-from writer import insert_trades_and_books, upsert_markets, run_backfill_loop, run_backfill
+from writer import EliteZleekWriter, upsert_markets, run_backfill_loop, run_backfill
 from clob_ws import subscribe
 import gamma_client
 import logging
 import sys
 from bars_jobs import run_bars_job
+import redis.asyncio as redis
 
 load_dotenv(".env.local")
 uri = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 LOG_LEVEL = logging.INFO
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -36,7 +38,7 @@ async def refresh_markets_periodically(pool, interval=600):
             raw = await gamma_client.fetch_markets()  # sync HTTP call
             logger.info("Fetched %d raw markets from Gamma", len(raw))
             
-            markets = gamma_client.parse_json(raw)
+            markets = gamma_client.parse_markets(raw)
             logger.info("Parsed %d markets from Gamma response", len(markets))
             
             # 2) Upsert into DB using the same pool
@@ -79,26 +81,26 @@ async def main():
     )
     
     # Create queue for passing events from subscriber to writer 
-    queue = asyncio.Queue(maxsize=5000)
     
     async with pool:
         logger.info("Database pool created successfully")
-        
+        redis_client = redis.from_url(REDIS_URL)
+        writer = EliteZleekWriter(pool, redis_client)
           # 1. Run large initial backfill (24 hours)
         try:
             logger.info("Running initial 24-hour backfill...")
-            await run_backfill(pool, queue, hours_back=24)
+            await run_backfill(pool, writer)
             logger.info("Initial backfill completed")
         except Exception as e:
             logger.error("Initial backfill failed: %s", e, exc_info=True)
         
         # Create all tasks
         writer_task = asyncio.create_task(
-            insert_trades_and_books(pool, queue),
-            name="writer"
+            writer.flush_loop(interval=5), 
+            name="writer_flush"
         )
         clob_task = asyncio.create_task(
-            subscribe(queue, pool),
+            subscribe(writer, pool), # We pass 'writer' instead of 'queue'
             name="clob_subscriber"
         )
         
@@ -113,7 +115,7 @@ async def main():
         
         # Periodic small backfills every hour (just last hour)
         backfill_task = asyncio.create_task(
-            run_backfill_loop(pool, queue, interval=300, hours_back=1),
+            run_backfill_loop(pool, writer, interval=300, hours_back=1),
             name="backfill_loop"
         )
         

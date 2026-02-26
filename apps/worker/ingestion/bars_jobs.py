@@ -3,11 +3,7 @@ import asyncpg
 import asyncio
 import logging
 import os
-import json
-import gamma_client
-from py_clob_client.clob_types import TradeParams
 from datetime import datetime, timezone,timedelta
-import pandas as pd
 import sys
 
 load_dotenv(".env.local")
@@ -67,7 +63,7 @@ async def run_bars_job(pool):
         await conn.execute(
             
             """
-            update bars_state set last_ts = $1 where id=1
+            update bars_state SET last_ts = $1 where id=1
             """,
             t_start
         )

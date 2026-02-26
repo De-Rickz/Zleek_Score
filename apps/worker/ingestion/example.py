@@ -2,7 +2,6 @@ from websocket import WebSocketApp
 import json
 import time
 import threading
-import os
 from dotenv import load_dotenv
 
 load_dotenv(".env.local")
