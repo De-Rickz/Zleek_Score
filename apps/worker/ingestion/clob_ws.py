@@ -53,7 +53,6 @@ async def subscribe(writer, pool):
                 close_timeout=10 
             ) as ws:
                 logger.info("Connected to CLOB websocket")
-                
                 await ws.send(json.dumps({"assets_ids": asset_ids}))
                 logger.info("Subscribed to %d assets", len(asset_ids))
                 

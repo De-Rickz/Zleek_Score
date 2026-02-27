@@ -41,7 +41,7 @@ class MarketRow(BaseModel):
 async def fetch_markets(min_liquidity=10000, min_volume=1000) -> List[dict]:
     all_raw_markets = []
     offset = 0
-    limit = 100
+    limit = 200
     
     # Using AsyncClient as a context manager is more efficient for multiple calls
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10.0) as client:

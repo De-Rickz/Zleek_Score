@@ -49,3 +49,9 @@ create table if not exists bars_1m(
   primary key (market_id, ts)
 );
  
+
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+SELECT create_hypertable('bars_1m', 'bucket');
+
+

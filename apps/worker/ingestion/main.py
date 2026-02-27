@@ -9,6 +9,10 @@ import logging
 import sys
 from bars_jobs import run_bars_job
 import redis.asyncio as redis
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Put this somewhere near your other imports at the top
+from signals.features import run_features_job
+from signals.tremor import run_tremor_job
 
 load_dotenv(".env.local")
 uri = os.getenv("DATABASE_URL")
@@ -119,12 +123,22 @@ async def main():
             name="backfill_loop"
         )
         
+        features_task = asyncio.create_task(
+            run_features_job(pool),
+            name="features_loop"
+        )
+        
+        tremor_task = asyncio.create_task(
+            run_tremor_job(pool),
+            name="tremor_loop"
+        )
+        
         logger.info("All tasks started. Running indefinitely...")
         
         # Wait for any task to complete (or crash)
         # In practice, these tasks run forever unless there's an unhandled error
         done, pending = await asyncio.wait(
-            [writer_task, clob_task,bars_task, gamma_task, backfill_task],
+            [writer_task, clob_task,bars_task, gamma_task, backfill_task, features_task, tremor_task],
             return_when=asyncio.FIRST_COMPLETED
         )
         
