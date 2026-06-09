@@ -25,8 +25,9 @@ async def calculate_features_for_market(conn, market_id: str):
     
     if len(bars) < 20:
         # Not enough data to calculate a reliable 20-period moving average yet!
+        logger.info("Not enough data to calculate a reliable 20-period moving average yet!")
         return
-
+    logger.info("****✅ THERE IS enough data to calculate a reliable 20-period moving average***")
     # Convert the SQL rows into a pandas DataFrame (our virtual spreadsheet)
     # We reverse it [::-1] so the oldest data is at the top, newest at the bottom
     df = pd.DataFrame([dict(b) for b in bars][::-1])
@@ -36,7 +37,7 @@ async def calculate_features_for_market(conn, market_id: str):
     rolling_std = df['close'].rolling(window=20).std()
     
     # Calculate the Z-Score: (Current - Mean) / StdDev
-    # We grab the very last value (.iloc[-1]) because that's the "current" z-score
+    # We grab the very last value (.i§o0loc[-1]) because that's the "current" z-score
     current_close = df['close'].iloc[-1]
     current_mean = rolling_mean.iloc[-1]
     current_std = rolling_std.iloc[-1]
@@ -45,7 +46,7 @@ async def calculate_features_for_market(conn, market_id: str):
     if current_std == 0 or pd.isna(current_std):
         z_score = 0.0
     else:
-        z_score = (current_close - current_mean) / current_std
+        z_score = (float(current_close) - current_mean) / current_std
 
     # ---------------------------------------------------------
     # 2. THE ORDER BOOK IMBALANCE (Tug-of-War Metric)

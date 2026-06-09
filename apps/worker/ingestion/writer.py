@@ -198,7 +198,7 @@ async def load_asset_maps(pool):
         if r["token_no_id"]: m[r["token_no_id"]] = (r["market_id"], "NO")
     return m
 
-async def load_condition_ids_for_backfill(pool, min_liq=10000, limit=20):
+async def load_condition_ids_for_backfill(pool, min_liq=10000, limit=200):
     query = """
         SELECT condition_id 
         FROM markets 

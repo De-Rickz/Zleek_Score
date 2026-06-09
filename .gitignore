@@ -40,3 +40,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# PostgreSQL data directory
+postgres_data/

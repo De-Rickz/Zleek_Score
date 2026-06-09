@@ -5,6 +5,8 @@ from websockets.exceptions import ConnectionClosed
 from writer import load_asset_maps, load_asset_ids
 from datetime import datetime, timezone
 import logging
+from collections import Counter
+event_counter = Counter()
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +54,9 @@ async def subscribe(writer, pool):
                 max_size=8 * 1024 * 1024,
                 close_timeout=10 
             ) as ws:
-                logger.info("Connected to CLOB websocket")
-                await ws.send(json.dumps({"assets_ids": asset_ids}))
+# 3. Subscribe to assets
+      
+                await ws.send(json.dumps({"assets_ids": asset_ids, "type": "MARKET"}))
                 logger.info("Subscribed to %d assets", len(asset_ids))
                 
                 hb = asyncio.create_task(heartbeat(ws))
@@ -62,6 +65,7 @@ async def subscribe(writer, pool):
                     while True:
                         raw = await ws.recv()
                         
+                  
                         if raw in ("PING", "PONG"):
                             continue
                         
@@ -70,6 +74,11 @@ async def subscribe(writer, pool):
                         
                         try:
                             data = json.loads(raw)
+                            if isinstance(data, list):
+                                event_types = [e.get("event_type") for e in data if isinstance(e, dict)]
+                                if "last_trade_price" in event_types:
+                                    logger.info("🎉 TRADE EVENT RECEIVED!")
+                                logger.debug("Batch types: %s", Counter(event_types))
                         except json.JSONDecodeError:
                             continue
                         
@@ -107,11 +116,17 @@ async def subscribe(writer, pool):
 # 🔌 3. Signature updated to expect 'writer'
 async def process_event(event, asset_maps, writer, raw):
     """Extract and normalize event data, then send directly to our elite writer."""
+    
     if not isinstance(event, dict):
         return
     
     t = event.get("event_type")
-    if t not in ("trade", "book"):
+    
+    event_counter[t] += 1
+    if sum(event_counter.values()) % 100 == 0:
+        logger.info("📊 Event stats: %s", dict(event_counter))
+        
+    if t not in ("last_trade_price", "book"):
         return
     
     event_asset_id = event.get("asset_id")
@@ -120,6 +135,7 @@ async def process_event(event, asset_maps, writer, raw):
     
     info = asset_maps.get(event_asset_id)
     if info is None:
+        logger.warning(f"Asset ID not in map: {event_asset_id}")
         return
     
     market_id, side_label = info
@@ -129,7 +145,9 @@ async def process_event(event, asset_maps, writer, raw):
     if dt is None:
         return
     
-    if t == "trade":
+    if t == "last_trade_price":
+        logger.info(event)
+        
         norm = {
             "kind": "trade",
             "id": event.get("id"),
@@ -183,6 +201,7 @@ async def process_event(event, asset_maps, writer, raw):
         
         # 🏎️ 5. Direct push to the Redis Waiting Room (Bouncer checks for spam)
         await writer.add_item(norm)
+        
 
 
 def parse_timestamp(ts):
