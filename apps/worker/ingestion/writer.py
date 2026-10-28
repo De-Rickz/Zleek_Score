@@ -4,8 +4,7 @@ import json
 import statistics
 from datetime import datetime, timezone, timedelta
 from collections import deque
-from clob_client import get_client
-from py_clob_client.clob_types import TradeParams
+import httpx
 # 📦 High-performance async drivers
 
 
@@ -48,11 +47,13 @@ class EliteZleekWriter:
         self.write_lag_counter = 0
 
         # 🏛️ SQL Queries (Your original schema)
+        # trades.id is a bigserial; it is left to the default (an explicit NULL
+        # would violate the primary key and abort the whole flush transaction).
         self.REST_QUERY = """
-            INSERT INTO trades(id, market_id, asset_id, ts, price, size_usd, side, 
-                               maker_wallet, taker_wallet, tx_hash, raw, status, 
+            INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side,
+                               maker_wallet, taker_wallet, tx_hash, raw, status,
                                market_order_id, match_time)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             ON CONFLICT (tx_hash) DO UPDATE SET price=EXCLUDED.price;
         """
         
@@ -134,7 +135,7 @@ class EliteZleekWriter:
 
     # --- 🗺️ Mapping Helpers ---
     def _map_rest(self, e):
-        return (e.get("id"), e.get("market_id"), e.get("asset_id"), coerce_dt(e.get("ts")),
+        return (e.get("market_id"), e.get("asset_id"), coerce_dt(e.get("ts")),
                 float(e.get("price", 0)), float(e.get("size_usd", 0)), e.get("side"),
                 e.get("maker_wallet"), e.get("taker_wallet"), e.get("tx_hash"),
                 json.dumps(e.get("raw")), e.get("status"), e.get("market_order_id"),
@@ -178,10 +179,25 @@ async def upsert_markets(pool, data):
     async with pool.acquire() as conn:
         await conn.executemany(query, rows)
 
-async def load_asset_ids(pool, min_liq=10000, limit=20):
-    query = "SELECT token_yes_id, token_no_id FROM markets WHERE status = 'open' AND liquidity_usd >= $1 ORDER BY liquidity_usd DESC LIMIT $2"
+async def load_asset_ids(pool, min_liq=10000, limit=20, fresh_within=timedelta(hours=2)):
+    # Top markets by 24h volume (liquidity goes stale once a market quiets down).
+    # Gamma bumps updatedAt on live markets within minutes, so rows it has not
+    # refreshed recently have dropped out of the fetch (closed, delisted, or
+    # past the ~2,100-row pagination cap) and are skipped. If the Gamma refresh
+    # has been failing, fall back to any open market rather than subscribing to
+    # nothing.
+    query = """
+        SELECT token_yes_id, token_no_id FROM markets
+        WHERE status = 'open' AND liquidity_usd >= $1
+          AND ($3::interval IS NULL OR updated_at > now() - $3::interval)
+        ORDER BY (raw->>'volume24hr')::float8 DESC NULLS LAST
+        LIMIT $2
+    """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, min_liq, limit)
+        rows = await conn.fetch(query, min_liq, limit, fresh_within)
+        if not rows:
+            logger.warning("No markets refreshed in the last %s; using stale rows", fresh_within)
+            rows = await conn.fetch(query, min_liq, limit, None)
     ids = set()
     for r in rows:
         if r["token_yes_id"]: ids.add(r["token_yes_id"])
@@ -198,48 +214,82 @@ async def load_asset_maps(pool):
         if r["token_no_id"]: m[r["token_no_id"]] = (r["market_id"], "NO")
     return m
 
-async def load_condition_ids_for_backfill(pool, min_liq=10000, limit=200):
+async def load_condition_ids_for_backfill(pool, exclude_asset_ids=(), min_liq=10000, limit=200):
+    # Markets already on the websocket are excluded: WS trades are stored without
+    # a tx_hash, so backfilling them too would store every trade twice.
     query = """
-        SELECT condition_id 
-        FROM markets 
-        WHERE status = 'open' AND liquidity_usd >= $1 AND condition_id IS NOT NULL 
-        GROUP BY condition_id 
-        ORDER BY MAX(liquidity_usd) DESC 
+        SELECT condition_id
+        FROM markets
+        WHERE status = 'open' AND liquidity_usd >= $1 AND condition_id IS NOT NULL
+          AND NOT (token_yes_id = ANY($3::text[]) OR token_no_id = ANY($3::text[]))
+        GROUP BY condition_id
+        ORDER BY MAX(liquidity_usd) DESC
         LIMIT $2
     """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, min_liq, limit)
+        rows = await conn.fetch(query, min_liq, limit, list(exclude_asset_ids))
     return [r["condition_id"] for r in rows]
 
-def parse_iso_z(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+DATA_API_URL = "https://data-api.polymarket.com"
+BACKFILL_PAGE_SIZE = 500
+BACKFILL_REQUEST_GAP_SEC = 0.5  # the Data API returns 429 after a few rapid requests
+
+async def fetch_public_trades(client, condition_id, cutoff_unix):
+    """Public trades for one market, newest first, back to cutoff_unix (epoch seconds)."""
+    trades, offset = [], 0
+    while True:
+        for attempt in range(3):
+            resp = await client.get("/trades", params={
+                "market": condition_id, "limit": BACKFILL_PAGE_SIZE, "offset": offset,
+            })
+            if resp.status_code != 429:
+                break
+            await asyncio.sleep(5 * (attempt + 1))
+        resp.raise_for_status()
+        page = resp.json()
+        await asyncio.sleep(BACKFILL_REQUEST_GAP_SEC)
+
+        trades.extend(t for t in page if t.get("timestamp", 0) >= cutoff_unix)
+        if len(page) < BACKFILL_PAGE_SIZE or page[-1].get("timestamp", 0) < cutoff_unix:
+            return trades
+        offset += len(page)
 
 async def run_backfill(pool, writer, hours_back=1):
     """
-    🔄 The Producer: Fills the Redis buffer with historical data.
+    🔄 The Producer: Fills the Redis buffer with recent public trades from the
+    Data API. (The CLOB /data/trades endpoint only returns the authenticated
+    wallet's own trades, which is why the old backfill wrote nothing.)
     """
-    
-    clob = get_client()
     t_start = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     cutoff_unix = int(t_start.timestamp())
-    
-    conds = await load_condition_ids_for_backfill(pool)
-    for cond in conds:
-        try:
-            resp = clob.get_trades(TradeParams(market=cond, after=str(cutoff_unix)))
-            for trade in resp:
-                mt = parse_iso_z(trade["match_time"])
-                if mt < t_start: continue
-                
-                norm = {
-                    "kind": "trade", "id": trade.get("id"), "market_id": trade.get("market_id"),
-                    "price": trade.get("price"), "ts": mt.isoformat(), "asset_id": trade.get("asset_id"),
-                    "tx_hash": trade.get("transaction_hash"), "raw": trade, "ingest_ts": datetime.now(timezone.utc).isoformat()
-                }
-                # 🚀 THE BIG CHANGE: Direct call to our new writer
-                await writer.add_item(norm)
-        except Exception as e:
-            logger.error(f"Backfill error for {cond}: {e}")
+
+    asset_maps = await load_asset_maps(pool)
+    ws_asset_ids = await load_asset_ids(pool)
+    conds = await load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_asset_ids)
+
+    queued = 0
+    async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
+        for cond in conds:
+            try:
+                for trade in await fetch_public_trades(client, cond, cutoff_unix):
+                    info = asset_maps.get(trade.get("asset"))
+                    if info is None:
+                        continue
+                    price = float(trade.get("price", 0))
+                    ts = datetime.fromtimestamp(trade["timestamp"], tz=timezone.utc)
+                    norm = {
+                        "kind": "trade", "market_id": info[0], "asset_id": trade.get("asset"),
+                        "ts": ts.isoformat(), "match_time": ts.isoformat(), "price": price,
+                        # Data API size is in shares; price is USD per share
+                        "size_usd": float(trade.get("size", 0)) * price,
+                        "side": trade.get("side"), "tx_hash": trade.get("transactionHash"), "raw": trade,
+                        "ingest_ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                    await writer.add_item(norm)
+                    queued += 1
+            except Exception as e:
+                logger.error(f"Backfill error for {cond}: {e}")
+    logger.info("Backfill queued %d trades from %d markets", queued, len(conds))
             
 async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
     """Periodically triggers the backfill process in the background."""

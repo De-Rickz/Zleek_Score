@@ -19,8 +19,21 @@ class MarketRow(BaseModel):
     liquidity_usd: float = Field(alias="liquidityNum", default=0.0)
     token_yes_id: Optional[str] = None
     token_no_id: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = Field(alias="updatedAt", default=None)
     raw: str
+
+    @root_validator(pre=True)
+    def map_status(cls, values):
+        # Gamma has no status field. Closed markets still report active=true,
+        # so `closed` is checked first. Values must match the markets.status CHECK.
+        if values.get("closed") or values.get("archived"):
+            resolved = values.get("umaResolutionStatus") == "resolved"
+            values["status"] = "resolved" if resolved else "closed"
+        elif values.get("active") is False or values.get("acceptingOrders") is False:
+            values["status"] = "paused"
+        else:
+            values["status"] = "open"
+        return values
 
     # 🚀 Change: Use root_validator to safely check the whole dictionary at once
     @root_validator(pre=True)
@@ -66,7 +79,7 @@ async def fetch_markets(min_liquidity=10000, min_volume=1000) -> List[dict]:
                     break
                     
                 all_raw_markets.extend(data)
-                offset += limit
+                offset += len(data)
                 logger.info(f"Fetched {len(all_raw_markets)} markets so far...")
                 
             except Exception as e:

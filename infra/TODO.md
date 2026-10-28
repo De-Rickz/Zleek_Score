@@ -1,0 +1,1 @@
+TODO: add index on trades(ts) or trades(market_id, ts) composite — bars_jobs.py's bar rebuild scans the full ix_trades_mkt_ts index since it filters by ts alone; cost scales with total trade volume, worse after Bug 3 widens market coverage. See infra/sql/migrations/.

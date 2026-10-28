@@ -29,7 +29,10 @@ __pycache__/
 venv/
 .venv/
 ENV/
+# Virtualenv that was once committed at the repo root (Zleek_Score/bin, lib, pyvenv.cfg)
+/Zleek_Score/
 .env.local
+.env
 
 # IDEs
 .vscode/
@@ -43,3 +46,7 @@ Thumbs.db
 
 # PostgreSQL data directory
 postgres_data/
+
+# logs and local tool settings
+*.log
+.claude/settings.local.json

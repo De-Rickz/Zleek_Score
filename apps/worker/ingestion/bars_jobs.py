@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 uri = os.getenv("DATABASE_URL")
 
+# Rebuild a trailing window each run so trades that arrive late (the REST
+# backfill fetches the last hour) still get bars. Must exceed the backfill's
+# hours_back.
+BARS_LOOKBACK = timedelta(minutes=65)
+
 
 async def run_bars_job(pool):
     logger.info("Bars Job started")
@@ -55,10 +60,13 @@ async def run_bars_job(pool):
             low        = excluded.low,
             close      = excluded.close,
             volume_usd = excluded.volume_usd,
-            trades_cnt = excluded.trades_cnt;
+            trades_cnt = excluded.trades_cnt
+        where (bars_1m.trades_cnt, bars_1m.volume_usd, bars_1m.close)
+              is distinct from (excluded.trades_cnt, excluded.volume_usd, excluded.close);
         """
-            
-        await conn.execute(query, last_ts,t_start)
+        # Older last_ts (worker was down) still catches up the whole gap
+        window_start = min(last_ts, t_now - BARS_LOOKBACK)
+        await conn.execute(query, window_start, t_start)
         
         await conn.execute(
             

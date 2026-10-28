@@ -12,6 +12,27 @@ logger = logging.getLogger(__name__)
 
 url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
+RESUBSCRIBE_CHECK_SEC = 300
+
+
+async def watch_subscription(ws, pool, current_ids, changed):
+    """Every RESUBSCRIBE_CHECK_SEC, reload the market selection. If it changed,
+    set `changed` and close the socket so subscribe() reconnects with the new set
+    (the subscription list is otherwise only loaded on reconnect)."""
+    while True:
+        await asyncio.sleep(RESUBSCRIBE_CHECK_SEC)
+        try:
+            new_ids = set(await load_asset_ids(pool))
+        except Exception as e:
+            logger.warning("Subscription check failed: %s", e)
+            continue
+        if new_ids and new_ids != current_ids:
+            logger.info("Market selection changed (+%d/-%d assets); resubscribing",
+                        len(new_ids - current_ids), len(current_ids - new_ids))
+            changed.set()
+            await ws.close()
+            return
+
 
 async def heartbeat(ws):
     """Send PING every 20 seconds to keep the connection alive"""
@@ -33,6 +54,7 @@ async def subscribe(writer, pool):
     max_backoff = 60
     
     while True:
+        changed = asyncio.Event()
         try:
             logger.info("Loading asset IDs and maps...")
             asset_ids = await load_asset_ids(pool)
@@ -60,7 +82,8 @@ async def subscribe(writer, pool):
                 logger.info("Subscribed to %d assets", len(asset_ids))
                 
                 hb = asyncio.create_task(heartbeat(ws))
-                
+                watcher = asyncio.create_task(watch_subscription(ws, pool, set(asset_ids), changed))
+
                 try:
                     while True:
                         raw = await ws.recv()
@@ -97,13 +120,16 @@ async def subscribe(writer, pool):
                                 continue
                 
                 finally:
-                    hb.cancel()
-                    try:
-                        await hb
-                    except asyncio.CancelledError:
-                        pass
-        
+                    for task in (hb, watcher):
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
         except ConnectionClosed as e:
+            if changed.is_set():
+                continue  # closed on purpose by watch_subscription; reconnect now
             logger.warning("WebSocket closed: %s. Reconnecting in %s sec...", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, max_backoff)

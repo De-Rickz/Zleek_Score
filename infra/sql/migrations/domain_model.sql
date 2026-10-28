@@ -18,7 +18,14 @@ CREATE TABLE IF NOT EXISTS signals_history (
     PRIMARY KEY (market_id, ts)
 );
 
--- 3) Alert Rules (What the user wants to be notified about)
+-- 3) Latest Tremor Score per market (dashboard snapshot)
+CREATE TABLE IF NOT EXISTS signals_latest (
+    market_id TEXT PRIMARY KEY REFERENCES markets(id),
+    ts TIMESTAMPTZ NOT NULL,
+    tremor_score NUMERIC CHECK (tremor_score >= 0 AND tremor_score <= 100)
+);
+
+-- 4) Alert Rules (What the user wants to be notified about)
 CREATE TABLE IF NOT EXISTS alert_rules (
     id SERIAL PRIMARY KEY,
     market_id TEXT REFERENCES markets(id),

@@ -2,6 +2,9 @@
 create table if not exists markets(
   id text primary key,                       -- polymarket market id
   title text not null,
+  event_id text,
+  condition_id text,
+  event_title text,
   category text,
   status text check (status in ('open','closed','resolved','paused')) default 'open',
   liquidity_usd numeric,
@@ -16,14 +19,18 @@ create table if not exists markets(
 create table if not exists trades(
   id bigserial primary key,
   market_id text references markets(id),
+  asset_id text,
   ts timestamptz not null,
   price numeric not null,                    -- probability 0..1
   size_usd numeric not null,
-  side text check (side in ('buy','sell')),
+  side text,
   maker_wallet text,
   taker_wallet text,
-  tx_hash text,
-  raw jsonb
+  tx_hash text unique,
+  raw jsonb,
+  status text,
+  market_order_id text,
+  match_time timestamptz
 );
 create index if not exists ix_trades_mkt_ts on trades(market_id, ts);
 
@@ -43,12 +50,20 @@ create table if not exists ob_snapshots(
 -- 4) 1-minute bars (built from trades)
 create table if not exists bars_1m(
   market_id text references markets(id),
-  ts timestamptz not null,                   -- bar open time
+  bucket timestamptz not null,                -- bar open time
   open numeric, high numeric, low numeric, close numeric,
   volume_usd numeric,
-  primary key (market_id, ts)
+  trades_cnt bigint,
+  primary key (market_id, bucket)
 );
- 
+
+-- 5) Bars job cursor (tracks last processed trade timestamp)
+create table if not exists bars_state(
+  id int primary key,
+  last_ts timestamptz not null
+);
+insert into bars_state (id, last_ts) values (1, now() - interval '1 hour')
+  on conflict (id) do nothing;
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 

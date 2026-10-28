@@ -6,10 +6,11 @@ services:
       - "5435:5432"
     environment:
       - POSTGRES_PASSWORD=Drinking451
-      - TS_TUNE_MEMORY=on
+      - TS_TUNE_MEMORY=2GB
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
-      - ./infra/sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./infra/sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./infra/sql/migrations/domain_model.sql:/docker-entrypoint-initdb.d/02_domain_model.sql
     
 
   redis:
