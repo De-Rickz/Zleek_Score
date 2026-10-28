@@ -3,9 +3,9 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: zleek_db
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"
     environment:
-      - POSTGRES_PASSWORD=Drinking451
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - TS_TUNE_MEMORY=2GB
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
