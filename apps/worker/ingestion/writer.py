@@ -49,6 +49,16 @@ class EliteZleekWriter:
         # 🏛️ SQL Queries (Your original schema)
         # trades.id is a bigserial; it is left to the default (an explicit NULL
         # would violate the primary key and abort the whole flush transaction).
+        #
+        # KNOWN LIMITATION: trades.tx_hash is UNIQUE, so if one on-chain
+        # transaction ever carries several fills, only the first fill's row
+        # (and size_usd) is kept; later fills only overwrite price. Applies to
+        # both live websocket and backfill trades. Observed 0 times as of
+        # 2026-10-28 (60k+ live events, 2.5k-fill Data API sample). Summing
+        # size_usd on conflict is NOT a safe fix: the backfill re-fetches the
+        # same trades every run and the websocket can redeliver, so sizes would
+        # inflate. A real fix needs a per-fill unique key (schema change).
+        # Monitor with scripts/check_multifill_collisions.py.
         self.REST_QUERY = """
             INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side,
                                maker_wallet, taker_wallet, tx_hash, raw, status,
@@ -84,6 +94,10 @@ class EliteZleekWriter:
 
         # 2. Routing & Throttling
         if kind == "trade":
+            # Any trade with a tx_hash (backfill or live websocket) goes through
+            # REST_QUERY, whose ON CONFLICT (tx_hash) makes a fill seen by both
+            # paths, or redelivered by the websocket, update the existing row
+            # (same price) instead of raising a UNIQUE violation.
             key = self.REDIS_REST if item.get("tx_hash") else self.REDIS_WS
         elif kind == "book":
             market_id = item.get("market_id")

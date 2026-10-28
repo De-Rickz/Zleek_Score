@@ -174,6 +174,7 @@ async def process_event(event, asset_maps, writer, raw):
     if t == "last_trade_price":
         logger.info(event)
         
+        price = float(event.get("price", 0))
         norm = {
             "kind": "trade",
             "id": event.get("id"),
@@ -181,12 +182,16 @@ async def process_event(event, asset_maps, writer, raw):
             "market_order_id": event.get("taker_order_id"),
             "asset_id": event_asset_id,
             "ts": dt,
-            "price": float(event.get("price", 0)),
-            "size_usd": float(event.get("notionalUsd", 0)),
+            "price": price,
+            # last_trade_price has no notional field; size is in shares
+            # (same formula as the REST backfill in writer.py)
+            "size_usd": float(event.get("size", 0)) * price,
             "side": event.get("side"),
             "maker_wallet": event.get("maker"),
             "taker_wallet": event.get("taker"),
-            "tx_hash": event.get("txHash"),
+            # Was read as "txHash", which the event never has, so it was always None.
+            # With it set, add_item routes the trade to REST_QUERY (ON CONFLICT on tx_hash).
+            "tx_hash": event.get("transaction_hash"),
             "status": event.get("status"),
             "raw": raw,
             # ⏱️ Telemetry timestamp added!
