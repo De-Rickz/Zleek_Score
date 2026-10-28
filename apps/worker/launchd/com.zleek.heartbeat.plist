@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zleek.heartbeat</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/derrick/Projects/Zleek_Score-main/apps/worker/.venv/bin/python3.11</string>
+        <string>../scripts/heartbeat.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/derrick/Projects/Zleek_Score-main/apps/worker/ingestion</string>
+
+    <!-- Every 15 minutes. No RunAtLoad/KeepAlive: the first check runs 15 min after loading. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!-- The script writes its own one-line entries; these only catch a crash traceback. -->
+    <key>StandardOutPath</key>
+    <string>/Users/derrick/Projects/Zleek_Score-main/apps/worker/ingestion/heartbeat.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/derrick/Projects/Zleek_Score-main/apps/worker/ingestion/heartbeat.log</string>
+</dict>
+</plist>
