@@ -18,12 +18,28 @@ SELECT count(*)                                                  AS bars,
 FROM b
 WHERE prev IS NOT NULL;
 
--- B) Markets currently scored, and how many are above the "tremor detected"
---    threshold of 50 (inflated by the zigzag z-scores).
-SELECT count(*)                                   AS scored_markets,
-       count(*) FILTER (WHERE tremor_score > 50)  AS over_50,
-       round(100.0 * count(*) FILTER (WHERE tremor_score > 50) / nullif(count(*), 0), 1) AS over_50_pct
-FROM signals_latest;
+-- B) Dashboard scores (scoring calibration, 2026-10-30). The tremor score is
+--    the price z-score only: min(|z| / 3, 1) * 100 from the newest features row
+--    at or before the score's timestamp (NULL z = 0). Also checks that only
+--    eligible markets are on the dashboard: open, and refreshed by Gamma in the
+--    last 2h or traded in the last 24h (same rule as
+--    signals.features.eligible_market_ids). Expect score_mismatch = 0 and
+--    ineligible_on_dashboard = 0. over_50 is a tracking number, not a pass/fail:
+--    it was 97 of 268 (36%) on the old formula and ~2-3 of ~218 at deploy time.
+SELECT count(*)                                                       AS scored_markets,
+       count(*) FILTER (WHERE l.tremor_score > 50)                    AS over_50,
+       round(100.0 * count(*) FILTER (WHERE l.tremor_score > 50) / nullif(count(*), 0), 1) AS over_50_pct,
+       count(*) FILTER (WHERE abs(l.tremor_score
+             - round(least(abs(coalesce(f.price_z_score, 0)) / 3.0, 1) * 100, 2)) > 0.01) AS score_mismatch,
+       count(*) FILTER (WHERE NOT (m.status = 'open'
+             AND (m.updated_at > now() - interval '2 hours'
+                  OR EXISTS (SELECT 1 FROM trades t WHERE t.market_id = l.market_id
+                             AND t.ts > now() - interval '24 hours')))) AS ineligible_on_dashboard
+FROM signals_latest l
+JOIN markets m ON m.id = l.market_id
+LEFT JOIN LATERAL (SELECT price_z_score FROM features_5m f
+                   WHERE f.market_id = l.market_id AND f.bucket <= l.ts
+                   ORDER BY f.bucket DESC LIMIT 1) f ON true;
 
 -- C) Token labels: token_yes_id must be clobTokenIds[0] (outcome 0, "Yes" on
 --    Yes/No markets). Catches the reversed labels stored until 2026-10-30.

@@ -1,9 +1,35 @@
 import asyncio
 import logging
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("Signals.Features")
+
+# Scoring calibration (ROADMAP phase 1, decided 2026-10-30):
+Z_WINDOW = timedelta(minutes=240)   # z uses only bars this recent...
+Z_MAX_BARS = 20                     # ...at most the 20 newest of them...
+Z_MIN_BARS = 10                     # ...and needs at least 10, else z is NULL (quiet)
+BOOK_MAX_AGE = timedelta(minutes=15)  # imbalance only from a book this fresh and two-sided
+ELIGIBLE_REFRESH = timedelta(hours=2)   # Gamma refreshed it recently...
+ELIGIBLE_TRADED = timedelta(hours=24)   # ...or it traded recently
+
+
+async def eligible_market_ids(conn):
+    """
+    Markets that get features and scores (and so appear on the dashboard): open
+    (status covers closed, resolved and not-accepting-orders), with bars, and
+    either refreshed by Gamma within ELIGIBLE_REFRESH or traded within
+    ELIGIBLE_TRADED. The traded test keeps active markets that fall outside
+    Gamma's ~2,100-market pagination window.
+    """
+    rows = await conn.fetch("""
+        SELECT m.id FROM markets m
+        WHERE m.id IN (SELECT DISTINCT market_id FROM bars_1m)
+          AND m.status = 'open'
+          AND (m.updated_at > now() - $1::interval
+               OR EXISTS (SELECT 1 FROM trades t WHERE t.market_id = m.id AND t.ts > now() - $2::interval))
+    """, ELIGIBLE_REFRESH, ELIGIBLE_TRADED)
+    return [r["id"] for r in rows]
 
 async def calculate_features_for_market(conn, market_id: str):
     """
@@ -13,55 +39,45 @@ async def calculate_features_for_market(conn, market_id: str):
     # ---------------------------------------------------------
     # 1. THE Z-SCORE (Rubber Band Metric)
     # ---------------------------------------------------------
-    # Fetch the last 20 minutes of price bars for this market
+    # Only recent bars count: a z built from bars of any age kept a market's last
+    # big move (often its resolution) scoring forever after trading stopped.
     bars_query = """
-        SELECT bucket, close 
-        FROM bars_1m 
-        WHERE market_id = $1 
-        ORDER BY bucket DESC 
-        LIMIT 20
+        SELECT bucket, close
+        FROM bars_1m
+        WHERE market_id = $1 AND bucket > now() - $2::interval
+        ORDER BY bucket DESC
+        LIMIT $3
     """
-    bars = await conn.fetch(bars_query, market_id)
-    
-    if len(bars) < 20:
-        # Not enough data to calculate a reliable 20-period moving average yet!
-        logger.info("Not enough data to calculate a reliable 20-period moving average yet!")
-        return
-    logger.info("****✅ THERE IS enough data to calculate a reliable 20-period moving average***")
-    # Convert the SQL rows into a pandas DataFrame (our virtual spreadsheet)
-    # We reverse it [::-1] so the oldest data is at the top, newest at the bottom
-    df = pd.DataFrame([dict(b) for b in bars][::-1])
-    
-    # 🪄 PANDAS MAGIC: Calculate the rolling average and standard deviation in 2 lines!
-    rolling_mean = df['close'].rolling(window=20).mean()
-    rolling_std = df['close'].rolling(window=20).std()
-    
-    # Calculate the Z-Score: (Current - Mean) / StdDev
-    # We grab the very last value (.i§o0loc[-1]) because that's the "current" z-score
-    current_close = df['close'].iloc[-1]
-    current_mean = rolling_mean.iloc[-1]
-    current_std = rolling_std.iloc[-1]
-    
-    # Prevent dividing by zero if the price hasn't moved at all in 20 minutes
-    if current_std == 0 or pd.isna(current_std):
-        z_score = 0.0
+    bars = await conn.fetch(bars_query, market_id, Z_WINDOW, Z_MAX_BARS)
+
+    if len(bars) < Z_MIN_BARS:
+        z_score = None  # quiet market: scored 0 by tremor
     else:
-        z_score = (float(current_close) - current_mean) / current_std
+        closes = pd.Series([float(b["close"]) for b in bars][::-1])  # oldest first
+        current_std = closes.std()  # sample stddev, as before
+        # Prevent dividing by zero if the price hasn't moved at all
+        if current_std == 0 or pd.isna(current_std):
+            z_score = 0.0
+        else:
+            z_score = (closes.iloc[-1] - closes.mean()) / current_std
 
     # ---------------------------------------------------------
     # 2. THE ORDER BOOK IMBALANCE (Tug-of-War Metric)
     # ---------------------------------------------------------
-    # Fetch the single most recent snapshot of the order book
+    # Only the newest snapshot, and only if it is fresh and has both sides. Books
+    # exist only for websocket-subscribed markets, so a stale one (market rotated
+    # out) or a one-sided one (empty side = exactly +/-1) is shown as n/a instead.
+    # Not part of the tremor score until books cover every market (ROADMAP phase 4).
     ob_query = """
-        SELECT bid_depth_usd, ask_depth_usd 
-        FROM ob_snapshots 
-        WHERE market_id = $1 
-        ORDER BY ts DESC 
-        LIMIT 1
+        SELECT bid_depth_usd, ask_depth_usd
+        FROM ob_snapshots
+        WHERE market_id = $1 AND ts > now() - $2::interval
+          AND jsonb_array_length(bids) > 0 AND jsonb_array_length(asks) > 0
+          AND ts = (SELECT max(ts) FROM ob_snapshots WHERE market_id = $1)
     """
-    ob = await conn.fetchrow(ob_query, market_id)
-    
-    ob_imbalance = 0.0
+    ob = await conn.fetchrow(ob_query, market_id, BOOK_MAX_AGE)
+
+    ob_imbalance = None
     if ob:
         bids = float(ob['bid_depth_usd'])
         asks = float(ob['ask_depth_usd'])
@@ -89,8 +105,10 @@ async def calculate_features_for_market(conn, market_id: str):
             price_z_score = EXCLUDED.price_z_score,
             ob_imbalance = EXCLUDED.ob_imbalance
     """
-    await conn.execute(insert_query, market_id, bucket, float(z_score), float(ob_imbalance))
-    logger.debug(f"[{market_id}] Z-Score: {z_score:.2f} | Imbalance: {ob_imbalance:.2f}")
+    await conn.execute(insert_query, market_id, bucket,
+                       None if z_score is None else float(z_score),
+                       None if ob_imbalance is None else float(ob_imbalance))
+    logger.debug(f"[{market_id}] Z-Score: {z_score} | Imbalance: {ob_imbalance}")
 
 
 async def run_features_job(pool):
@@ -100,12 +118,10 @@ async def run_features_job(pool):
     while True:
         try:
             async with pool.acquire() as conn:
-                # Find all markets that actually have recent trades
-                active_markets_query = "SELECT DISTINCT market_id FROM bars_1m"
-                markets = await conn.fetch(active_markets_query)
-                
-                for m in markets:
-                    await calculate_features_for_market(conn, m["market_id"])
+                markets = await eligible_market_ids(conn)
+
+                for market_id in markets:
+                    await calculate_features_for_market(conn, market_id)
                     
             logger.info("Calculated features for %d markets.", len(markets))
             

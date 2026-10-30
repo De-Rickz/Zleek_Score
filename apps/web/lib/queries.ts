@@ -48,7 +48,10 @@ export async function getLatestFeatures(marketId: string): Promise<Features | nu
   const rows = await sql<Features[]>`
     SELECT (extract(epoch FROM bucket) * 1000)::float8 AS bucket_ms,
            price_z_score::float8 AS price_zscore,
-           ob_imbalance::float8 AS ob_imbalance
+           -- The worker only stores imbalance from a fresh, two-sided book; also
+           -- hide it if this row is old (market no longer scored, or pre-cutoff).
+           CASE WHEN bucket > now() - interval '15 minutes'
+                THEN ob_imbalance::float8 END AS ob_imbalance
     FROM features_5m WHERE market_id = ${marketId}
     ORDER BY bucket DESC LIMIT 1`
   return rows[0] ? { ...rows[0] } : null

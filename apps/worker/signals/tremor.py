@@ -2,6 +2,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from signals.features import eligible_market_ids
+
 logger = logging.getLogger("Signals.Tremor")
 
 async def calculate_tremor_for_market(conn, market_id: str):
@@ -21,24 +23,18 @@ async def calculate_tremor_for_market(conn, market_id: str):
     if not latest:
         return
 
+    # NULL z = fewer than Z_MIN_BARS recent bars: a quiet market, scored 0
     z_score = float(latest["price_z_score"] or 0)
-    imbalance = float(latest["ob_imbalance"] or 0)
-    
+
     # ---------------------------------------------------------
     # 🌍 THE TREMOR ALGORITHM
     # ---------------------------------------------------------
-    # A Z-score of 3.0 is a massive move. Let's make that worth 50 points.
-    # We use abs() because a massive crash (-3.0) is just as big of a tremor as a massive pump (+3.0).
-    z_points = min(abs(z_score) * (50 / 3.0), 50) 
-    
-    # An imbalance of 1.0 (or -1.0) is a totally one-sided order book. Worth 50 points.
-    imb_points = min(abs(imbalance) * 50, 50)
-    
-    # Combine them for the final 0-100 score!
-    tremor_score = round(z_points + imb_points, 2)
-    
-    # Clamp it between 0 and 100 just to be mathematically safe
-    tremor_score = max(0.0, min(100.0, tremor_score))
+    # Price move only, 0-100: |z| of 3.0 or more is a massive move = 100.
+    # abs() because a crash (-3.0) is as big a tremor as a pump (+3.0).
+    # Order-book imbalance is no longer part of the score: books only exist for
+    # websocket-subscribed markets, so it is shown separately (when fresh) and
+    # can rejoin once books cover every market (ROADMAP phase 4).
+    tremor_score = round(min(abs(z_score) / 3.0, 1.0) * 100, 2)
 
     # ---------------------------------------------------------
     # 💾 SAVE THE DATA (History + Latest)
@@ -76,11 +72,16 @@ async def run_tremor_job(pool):
     while True:
         try:
             async with pool.acquire() as conn:
-                # Find markets that have features calculated
-                markets = await conn.fetch("SELECT DISTINCT market_id FROM features_5m")
-                for m in markets:
-                    await calculate_tremor_for_market(conn, m["market_id"])
-                    
+                # Same rule as the features job: ended, stale or untraded
+                # markets are not scored and drop off the dashboard.
+                markets = await eligible_market_ids(conn)
+                for market_id in markets:
+                    await calculate_tremor_for_market(conn, market_id)
+                if markets:  # never empty the dashboard on a bad eligibility read
+                    removed = await conn.execute(
+                        "DELETE FROM signals_latest WHERE market_id <> ALL($1::text[])", markets)
+                    logger.info("Removed no-longer-eligible markets from signals_latest: %s", removed)
+
             logger.info("Calculated Tremor scores for %d markets.", len(markets))
         except Exception as e:
             logger.error("Error in tremor job: %s", e, exc_info=True)
