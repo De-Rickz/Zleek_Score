@@ -34,8 +34,10 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
               sub={signal ? timeAgo(signal.scored_at_ms) : undefined} />
         <Stat label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'} />
         {/* Not part of the tremor score; null when the book is stale or one-sided */}
-        <Stat label="Order-book imbalance" sub="whole book"
-              value={features?.ob_imbalance != null ? fixed(features.ob_imbalance, 2) : 'n/a'} />
+        {features?.ob_imbalance != null
+          ? <Stat label="Order-book imbalance" value={fixed(features.ob_imbalance, 2)}
+                  sub="whole book, incl. orders far from the price" />
+          : <Stat label="Order-book imbalance" value="n/a" />}
       </section>
 
       <section>
