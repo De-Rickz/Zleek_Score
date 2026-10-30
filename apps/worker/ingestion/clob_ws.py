@@ -2,7 +2,7 @@ import asyncio
 import json
 import websockets
 from websockets.exceptions import ConnectionClosed
-from writer import load_asset_maps, load_asset_ids
+from writer import load_asset_maps, load_asset_ids, to_yes_terms, book_to_yes_terms
 from datetime import datetime, timezone
 import logging
 from collections import Counter
@@ -174,7 +174,8 @@ async def process_event(event, asset_maps, writer, raw):
     if t == "last_trade_price":
         logger.info(event)
         
-        price = float(event.get("price", 0))
+        raw_price = float(event.get("price", 0))
+        price, side = to_yes_terms(raw_price, event.get("side"), side_label)
         norm = {
             "kind": "trade",
             "id": event.get("id"),
@@ -183,10 +184,10 @@ async def process_event(event, asset_maps, writer, raw):
             "asset_id": event_asset_id,
             "ts": dt,
             "price": price,
-            # last_trade_price has no notional field; size is in shares
-            # (same formula as the REST backfill in writer.py)
-            "size_usd": float(event.get("size", 0)) * price,
-            "side": event.get("side"),
+            # last_trade_price has no notional field; size is in shares and the
+            # raw token price is USD per share (same formula as the backfill)
+            "size_usd": float(event.get("size", 0)) * raw_price,
+            "side": side,
             "maker_wallet": event.get("maker"),
             "taker_wallet": event.get("taker"),
             # Was read as "txHash", which the event never has, so it was always None.
@@ -202,13 +203,9 @@ async def process_event(event, asset_maps, writer, raw):
         await writer.add_item(norm)
     
     elif t == "book":
-        if side_label == "YES":
-            bids = event.get("bids") or []
-            asks = event.get("asks") or []
-        else:
-            bids = event.get("asks") or []
-            asks = event.get("bids") or []
-        
+        # Swapping sides alone (the old behaviour) left NO prices unconverted.
+        bids, asks = book_to_yes_terms(event.get("bids") or [], event.get("asks") or [], side_label)
+
         best_bid = max((float(b.get("price", 0)) for b in bids), default=0.0)
         depth_bid = sum(float(b.get("price", 0)) * float(b.get("size", 0)) for b in bids)
         

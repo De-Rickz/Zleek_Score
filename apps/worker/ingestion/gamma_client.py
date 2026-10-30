@@ -43,9 +43,11 @@ class MarketRow(BaseModel):
             try:
                 ids = json.loads(raw_ids)
                 if len(ids) == 2:
-                    # Inject both IDs safely into the model
-                    values["token_no_id"] = ids[0]
-                    values["token_yes_id"] = ids[1] 
+                    # clobTokenIds follow `outcomes` order. Outcome 0 is "Yes" in
+                    # every Yes/No market (checked 2026-10-30: 30,427 of 30,427), and
+                    # is the reference outcome for named markets ("Team A" vs "Team B").
+                    values["token_yes_id"] = ids[0]
+                    values["token_no_id"] = ids[1]
             except Exception:
                 pass
         return values

@@ -4,6 +4,7 @@ import json
 import statistics
 from datetime import datetime, timezone, timedelta
 from collections import deque
+from decimal import Decimal
 import httpx
 # 📦 High-performance async drivers
 
@@ -23,6 +24,32 @@ def coerce_dt(value):
         except ValueError:
             return None
     return None
+
+def to_yes_terms(price, side, side_label):
+    """
+    Express a trade in outcome-0 ("YES") terms so both tokens of a market share
+    one price series. A NO trade at p is a YES trade at 1 - p, and buying NO is
+    selling YES. size_usd is NOT converted: callers compute it from the raw
+    token price, which is the USD actually paid.
+    """
+    if side_label == "NO":
+        return 1.0 - price, {"BUY": "SELL", "SELL": "BUY"}.get(side, side)
+    return price, side
+
+def book_to_yes_terms(bids, asks, side_label):
+    """
+    Express an order book in outcome-0 ("YES") terms. Someone selling NO at q
+    is offering YES at 1 - q, so the NO book's asks become YES bids and its
+    bids become YES asks, each repriced to 1 - q (sizes in shares are
+    unchanged). Decimal keeps the repriced levels exact ("0.06", not
+    "0.06000000000000005").
+    """
+    if side_label != "NO":
+        return bids, asks
+    def flip(levels):
+        return [{"price": str(Decimal(1) - Decimal(str(lvl.get("price", 0)))), "size": lvl.get("size", 0)}
+                for lvl in levels]
+    return flip(asks), flip(bids)
 
 class EliteZleekWriter:
     """
@@ -289,14 +316,15 @@ async def run_backfill(pool, writer, hours_back=1):
                     info = asset_maps.get(trade.get("asset"))
                     if info is None:
                         continue
-                    price = float(trade.get("price", 0))
+                    raw_price = float(trade.get("price", 0))
+                    price, side = to_yes_terms(raw_price, trade.get("side"), info[1])
                     ts = datetime.fromtimestamp(trade["timestamp"], tz=timezone.utc)
                     norm = {
                         "kind": "trade", "market_id": info[0], "asset_id": trade.get("asset"),
                         "ts": ts.isoformat(), "match_time": ts.isoformat(), "price": price,
-                        # Data API size is in shares; price is USD per share
-                        "size_usd": float(trade.get("size", 0)) * price,
-                        "side": trade.get("side"), "tx_hash": trade.get("transactionHash"), "raw": trade,
+                        # Data API size is in shares; the raw token price is USD per share
+                        "size_usd": float(trade.get("size", 0)) * raw_price,
+                        "side": side, "tx_hash": trade.get("transactionHash"), "raw": trade,
                         "ingest_ts": datetime.now(timezone.utc).isoformat(),
                     }
                     await writer.add_item(norm)
