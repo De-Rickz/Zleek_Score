@@ -22,19 +22,26 @@ WHERE prev IS NOT NULL;
 --    the price z-score only: min(|z| / 3, 1) * 100 from the newest features row
 --    at or before the score's timestamp (NULL z = 0). Also checks that only
 --    eligible markets are on the dashboard: open, and refreshed by Gamma in the
---    last 2h or traded in the last 24h (same rule as
---    signals.features.eligible_market_ids). Expect score_mismatch = 0 and
---    ineligible_on_dashboard = 0. over_50 is a tracking number, not a pass/fail:
---    it was 97 of 268 (36%) on the old formula and ~2-3 of ~218 at deploy time.
+--    2h or traded in the 24h before the row was scored (same rule as
+--    signals.features.eligible_market_ids). Eligibility is judged as of the
+--    scoring time, not now(): the windows slide, so a market can age out
+--    between 5-minute tremor runs and is removed on the next one. stale_scores
+--    catches the other failure, a row the tremor job stopped updating.
+--    (status and updated_at are current values, so a market closed or
+--    refreshed since its last scoring run can still differ for up to one run.)
+--    Expect score_mismatch = 0, ineligible_on_dashboard = 0, stale_scores = 0.
+--    over_50 is a tracking number, not a pass/fail: it was 97 of 268 (36%) on
+--    the old formula and 7 of 211 after deploy (2026-10-30).
 SELECT count(*)                                                       AS scored_markets,
        count(*) FILTER (WHERE l.tremor_score > 50)                    AS over_50,
        round(100.0 * count(*) FILTER (WHERE l.tremor_score > 50) / nullif(count(*), 0), 1) AS over_50_pct,
        count(*) FILTER (WHERE abs(l.tremor_score
              - round(least(abs(coalesce(f.price_z_score, 0)) / 3.0, 1) * 100, 2)) > 0.01) AS score_mismatch,
        count(*) FILTER (WHERE NOT (m.status = 'open'
-             AND (m.updated_at > now() - interval '2 hours'
+             AND (m.updated_at > l.ts - interval '2 hours'
                   OR EXISTS (SELECT 1 FROM trades t WHERE t.market_id = l.market_id
-                             AND t.ts > now() - interval '24 hours')))) AS ineligible_on_dashboard
+                             AND t.ts > l.ts - interval '24 hours' AND t.ts <= l.ts)))) AS ineligible_on_dashboard,
+       count(*) FILTER (WHERE l.ts < now() - interval '10 minutes')  AS stale_scores
 FROM signals_latest l
 JOIN markets m ON m.id = l.market_id
 LEFT JOIN LATERAL (SELECT price_z_score FROM features_5m f
