@@ -29,13 +29,14 @@
 -- exactly 0.5, where only the side changes.
 --
 -- ob_snapshots are NOT repaired (no asset_id or raw column, so they can't be
--- recomputed from source). Cutoff = the worker restart time that deploys
--- branch fix/outcome-orientation: snapshots before it are in mixed
+-- recomputed from source). Snapshots before the cutoff are in mixed
 -- orientation (~97% have only bid/ask sides swapped, ~3% are NO books in NO
--- terms); snapshots after it are in YES terms. Record the exact time here and
--- in infra/TODO.md after restarting:
---   CUTOFF (UTC): ______________________
---   (last "Starting main application" line in apps/worker/ingestion/worker.log)
+-- terms); snapshots after it are in YES terms. The cutoff is NOT the restart:
+-- the websocket keeps the token mapping it loaded at connect time, so books
+-- stay wrong until its first subscribe after the token-column repair.
+--   CUTOFF (UTC): 2026-10-30 17:24:17 (first websocket subscribe after the
+--   token-column repair; the worker restart was 17:06:04). Snapshots from
+--   17:09:08-17:24:08 were converted with the still-reversed mapping.
 --
 -- Run with a role that can UPDATE trades (zleek_web cannot).
 

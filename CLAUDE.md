@@ -29,6 +29,7 @@
 - The REST backfill re-fetches the last hour every 5 min, and REST_QUERY's ON CONFLICT (tx_hash) overwrites price. Any repair must account for this.
 - Postgres secrets use hex-only passwords; base64 characters break connection URLs.
 - Deploy order for data fixes: human restarts the worker first, then runs repairs, then rebuilds.
+- The websocket loads the token mapping (load_asset_maps) only when it connects. After any repair of markets.token_* columns, live trades and order books keep the old mapping until the next "Subscribed to N assets" in worker.log. Trades can be re-repaired from raw; ob_snapshots can't, so their cutoff is that subscribe time, not the restart (2026-10-30: restart 17:06:04, subscribe 17:24:17).
 
 ## Definition of done
 - Diff approved, test or acceptance query added, infra/TODO.md updated, and the deploy steps written out for the human.

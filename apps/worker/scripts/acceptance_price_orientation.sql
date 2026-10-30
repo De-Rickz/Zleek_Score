@@ -56,15 +56,14 @@ SELECT count(*)                                                       AS trades,
        count(*) FILTER (WHERE side IS DISTINCT FROM yes_side)         AS side_wrong
 FROM e;
 
--- E) Order-book snapshots (last 24h) must be in YES terms. The old code swapped
---    bids/asks of the wrong token without repricing, which leaves two
---    signatures: crossed books (best_bid > best_ask), and books whose mid sits
---    on the other side of the market (|mid - same-minute bar close| > 0.5).
---    best_bid/best_ask must also agree with the stored bids/asks JSON.
---    The mid-vs-close check is only meaningful once trades and bars are in
---    YES terms (after the trade repair and bars rebuild). Expect ~0 for
---    snapshots written after the restart; real gaps (empty side, thin book)
---    can still trip the mid check occasionally.
+-- E) Order-book snapshots written after the order-book cutoff must be in YES
+--    terms: no crossed books (best_bid > best_ask), best_bid/best_ask agreeing
+--    with the stored bids/asks JSON, and mids on the same side of the market as
+--    the same-minute bar close. Expect 0 for all three.
+--    Cutoff = 2026-10-30 17:24:17 UTC, the first websocket subscribe after the
+--    token-column repair. Snapshots before it can't be repaired (no asset_id or
+--    raw column): before the 17:06:04 restart ~97% are crossed, and the 65
+--    written 17:09:08-17:24:08 were converted with the still-reversed mapping.
 WITH s AS (
   SELECT o.market_id, o.ts, o.best_bid, o.best_ask,
          (SELECT max((l->>'price')::numeric) FROM jsonb_array_elements(o.bids) l) AS json_best_bid,
@@ -72,7 +71,7 @@ WITH s AS (
          b.close
   FROM ob_snapshots o
   LEFT JOIN bars_1m b ON b.market_id = o.market_id AND b.bucket = date_trunc('minute', o.ts)
-  WHERE o.ts > now() - interval '24 hours'
+  WHERE o.ts >= '2026-10-30 17:24:17+00'   -- order-book cutoff (see above)
 )
 SELECT count(*)                                                                   AS snapshots,
        count(*) FILTER (WHERE best_bid > 0 AND best_ask > 0 AND best_bid > best_ask) AS crossed,
