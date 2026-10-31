@@ -61,6 +61,12 @@ FROM markets;
 --    websocket message as a JSON string; backfill rows store the Data API
 --    object). Orientation comes from the market's clobTokenIds, not from the
 --    token columns. Expect 0 wrong after the trade-price repair.
+--    Price tolerance is one tick (0.001), not exact: when the backfill
+--    re-fetches a live fill, REST_QUERY's ON CONFLICT updates price with the
+--    Data API's more precise fill price while raw keeps the websocket's rounded
+--    one (2026-10-31: 237 of 305k live rows, max difference 0.00022). An
+--    orientation error is off by |1 - 2p|, far more than a tick unless p is
+--    within 0.0005 of 0.5, where orientation doesn't matter.
 WITH t AS (
   SELECT t.price, t.side, t.asset_id,
          CASE WHEN jsonb_typeof(t.raw) = 'string' THEN (t.raw #>> '{}')::jsonb ELSE t.raw END AS r,
@@ -75,14 +81,17 @@ WITH t AS (
 )
 SELECT count(*)                                                       AS trades,
        count(*) FILTER (WHERE yes_price IS NULL)                      AS no_raw_price,
-       count(*) FILTER (WHERE abs(price - yes_price) > 1e-6)          AS price_wrong,
+       count(*) FILTER (WHERE abs(price - yes_price) > 0.001)         AS price_wrong,
        count(*) FILTER (WHERE side IS DISTINCT FROM yes_side)         AS side_wrong
 FROM e;
 
 -- E) Order-book snapshots written after the order-book cutoff must be in YES
 --    terms: no crossed books (best_bid > best_ask), best_bid/best_ask agreeing
 --    with the stored bids/asks JSON, and mids on the same side of the market as
---    the same-minute bar close. Expect 0 for all three.
+--    the last trade at or before the snapshot (if that trade is under 10
+--    minutes old). Expect 0 for all three. (It used the same-minute bar close
+--    until 2026-10-31, which can come after the snapshot: a market jumping
+--    mid-minute, e.g. a goal, looked like an orientation error.)
 --    Cutoff = 2026-10-30 17:24:17 UTC, the first websocket subscribe after the
 --    token-column repair. Snapshots before it can't be repaired (no asset_id or
 --    raw column): before the 17:06:04 restart ~97% are crossed, and the 65
@@ -91,16 +100,18 @@ WITH s AS (
   SELECT o.market_id, o.ts, o.best_bid, o.best_ask,
          (SELECT max((l->>'price')::numeric) FROM jsonb_array_elements(o.bids) l) AS json_best_bid,
          (SELECT min((l->>'price')::numeric) FROM jsonb_array_elements(o.asks) l) AS json_best_ask,
-         b.close
+         lt.price AS last_trade
   FROM ob_snapshots o
-  LEFT JOIN bars_1m b ON b.market_id = o.market_id AND b.bucket = date_trunc('minute', o.ts)
+  LEFT JOIN LATERAL (SELECT price FROM trades t
+                     WHERE t.market_id = o.market_id AND t.ts <= o.ts AND t.ts > o.ts - interval '10 minutes'
+                     ORDER BY t.ts DESC LIMIT 1) lt ON true
   WHERE o.ts >= '2026-10-30 17:24:17+00'   -- order-book cutoff (see above)
 )
 SELECT count(*)                                                                   AS snapshots,
        count(*) FILTER (WHERE best_bid > 0 AND best_ask > 0 AND best_bid > best_ask) AS crossed,
        count(*) FILTER (WHERE json_best_bid IS DISTINCT FROM best_bid::numeric
                            AND abs(coalesce(json_best_bid, 0) - best_bid::numeric) > 1e-9) AS best_bid_mismatch,
-       count(*) FILTER (WHERE close IS NOT NULL AND best_bid > 0 AND best_ask > 0
-                           AND abs((best_bid + best_ask) / 2 - close) > 0.5)        AS mid_far_from_close,
-       count(*) FILTER (WHERE close IS NOT NULL AND best_bid > 0 AND best_ask > 0)  AS comparable
+       count(*) FILTER (WHERE last_trade IS NOT NULL AND best_bid > 0 AND best_ask > 0
+                           AND abs((best_bid + best_ask) / 2 - last_trade) > 0.5)   AS mid_far_from_last_trade,
+       count(*) FILTER (WHERE last_trade IS NOT NULL AND best_bid > 0 AND best_ask > 0) AS comparable
 FROM s;
