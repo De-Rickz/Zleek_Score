@@ -9,7 +9,7 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 
 ## Phases (in order)
 1. Data correctness: token labels, YES-equivalent prices, repair + rebuild history; scoring calibration. (done 2026-10-30: deployed; acceptance A-E pass, see apps/worker/scripts/acceptance_price_orientation.sql)
-2. Data loss: backfill from newest stored trade on startup; dead-websocket detection; Redis flush only deletes after commit.
+2. Data loss: backfill from newest stored trade on startup; dead-websocket detection; Redis flush only deletes after commit. (done 2026-10-31: deployed; acceptance A-E pass. Related, still open in infra/TODO.md: events dropped while Redis is down.)
 3. Hosting: move worker, Postgres, Redis and web app together to a VPS (systemd, Caddy). Fresh database.
 4. Coverage (Option B): raise the websocket market cap; add trades(ts) index first. Books for every scored market, then imbalance can rejoin the tremor score. Leftover from phase 1: measure imbalance near the price (calibration item 4) once a few days of fresh order books have built up.
 5. Packaging: README with architecture diagram, demo video.

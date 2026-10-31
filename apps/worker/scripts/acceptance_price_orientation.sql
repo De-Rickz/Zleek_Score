@@ -88,10 +88,14 @@ FROM e;
 -- E) Order-book snapshots written after the order-book cutoff must be in YES
 --    terms: no crossed books (best_bid > best_ask), best_bid/best_ask agreeing
 --    with the stored bids/asks JSON, and mids on the same side of the market as
---    the last trade at or before the snapshot (if that trade is under 10
---    minutes old). Expect 0 for all three. (It used the same-minute bar close
---    until 2026-10-31, which can come after the snapshot: a market jumping
---    mid-minute, e.g. a goal, looked like an orientation error.)
+--    the trades around them. A snapshot is flagged only if its mid is more
+--    than 0.5 from BOTH the last trade at or before it and the first trade
+--    after it (each within 10 minutes; whichever exist). A wrong-orientation
+--    book is far from both; a real jump is near one side, the old price
+--    before or the new price after, including when quotes move a moment
+--    before the next trades print. Expect 0 for all three. (Until 2026-10-31
+--    it compared with the same-minute bar close, then the last prior trade;
+--    both flagged real jumps, e.g. a goal in Lille OSC at 21:47:37 on 10-30.)
 --    Cutoff = 2026-10-30 17:24:17 UTC, the first websocket subscribe after the
 --    token-column repair. Snapshots before it can't be repaired (no asset_id or
 --    raw column): before the 17:06:04 restart ~97% are crossed, and the 65
@@ -100,18 +104,26 @@ WITH s AS (
   SELECT o.market_id, o.ts, o.best_bid, o.best_ask,
          (SELECT max((l->>'price')::numeric) FROM jsonb_array_elements(o.bids) l) AS json_best_bid,
          (SELECT min((l->>'price')::numeric) FROM jsonb_array_elements(o.asks) l) AS json_best_ask,
-         lt.price AS last_trade
+         prev.price AS prev_trade, nxt.price AS next_trade
   FROM ob_snapshots o
   LEFT JOIN LATERAL (SELECT price FROM trades t
                      WHERE t.market_id = o.market_id AND t.ts <= o.ts AND t.ts > o.ts - interval '10 minutes'
-                     ORDER BY t.ts DESC LIMIT 1) lt ON true
+                     ORDER BY t.ts DESC LIMIT 1) prev ON true
+  LEFT JOIN LATERAL (SELECT price FROM trades t
+                     WHERE t.market_id = o.market_id AND t.ts > o.ts AND t.ts <= o.ts + interval '10 minutes'
+                     ORDER BY t.ts ASC LIMIT 1) nxt ON true
   WHERE o.ts >= '2026-10-30 17:24:17+00'   -- order-book cutoff (see above)
+), c AS (
+  SELECT *, (best_bid + best_ask) / 2 AS mid,
+         best_bid > 0 AND best_ask > 0 AND (prev_trade IS NOT NULL OR next_trade IS NOT NULL) AS is_comparable
+  FROM s
 )
 SELECT count(*)                                                                   AS snapshots,
        count(*) FILTER (WHERE best_bid > 0 AND best_ask > 0 AND best_bid > best_ask) AS crossed,
        count(*) FILTER (WHERE json_best_bid IS DISTINCT FROM best_bid::numeric
                            AND abs(coalesce(json_best_bid, 0) - best_bid::numeric) > 1e-9) AS best_bid_mismatch,
-       count(*) FILTER (WHERE last_trade IS NOT NULL AND best_bid > 0 AND best_ask > 0
-                           AND abs((best_bid + best_ask) / 2 - last_trade) > 0.5)   AS mid_far_from_last_trade,
-       count(*) FILTER (WHERE last_trade IS NOT NULL AND best_bid > 0 AND best_ask > 0) AS comparable
-FROM s;
+       count(*) FILTER (WHERE is_comparable
+                           AND coalesce(abs(mid - prev_trade) > 0.5, true)
+                           AND coalesce(abs(mid - next_trade) > 0.5, true))       AS mid_far_from_nearby_trades,
+       count(*) FILTER (WHERE is_comparable)                                       AS comparable
+FROM c;
