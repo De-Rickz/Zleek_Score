@@ -90,10 +90,16 @@ FROM e;
 --    with the stored bids/asks JSON, and mids on the same side of the market as
 --    the trades around them. A snapshot is flagged only if its mid is more
 --    than 0.5 from BOTH the last trade at or before it and the first trade
---    after it (each within 10 minutes; whichever exist). A wrong-orientation
---    book is far from both; a real jump is near one side, the old price
---    before or the new price after, including when quotes move a moment
---    before the next trades print. Expect 0 for all three. (Until 2026-10-31
+--    after it (each within 10 minutes). A wrong-orientation book is far from
+--    both; a real jump is near one side, the old price before or the new price
+--    after, including when quotes move a moment before the next trades print.
+--    Quiet markets, by choice: with trades on only one side, the mid is
+--    compared with that side alone (this caught 4 of the 63 known-bad books
+--    in the 17:09-17:24 window; it could flag a real jump that no trade
+--    followed within 10 minutes, see one_sided_comparable); snapshots with no
+--    trade within 10 minutes on either side are skipped (not comparable).
+--    Expect 0 for crossed, best_bid_mismatch and mid_far_from_nearby_trades.
+--    (Until 2026-10-31
 --    it compared with the same-minute bar close, then the last prior trade;
 --    both flagged real jumps, e.g. a goal in Lille OSC at 21:47:37 on 10-30.)
 --    Cutoff = 2026-10-30 17:24:17 UTC, the first websocket subscribe after the
@@ -125,5 +131,9 @@ SELECT count(*)                                                                 
        count(*) FILTER (WHERE is_comparable
                            AND coalesce(abs(mid - prev_trade) > 0.5, true)
                            AND coalesce(abs(mid - next_trade) > 0.5, true))       AS mid_far_from_nearby_trades,
-       count(*) FILTER (WHERE is_comparable)                                       AS comparable
+       count(*) FILTER (WHERE is_comparable)                                       AS comparable,
+       count(*) FILTER (WHERE is_comparable
+                           AND (prev_trade IS NULL OR next_trade IS NULL))        AS one_sided_comparable,
+       count(*) FILTER (WHERE best_bid > 0 AND best_ask > 0
+                           AND prev_trade IS NULL AND next_trade IS NULL)         AS skipped_no_nearby_trades
 FROM c;
