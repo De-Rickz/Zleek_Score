@@ -14,6 +14,20 @@ url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 RESUBSCRIBE_CHECK_SEC = 300
 
+# Keepalive and dead-connection detection (ROADMAP phase 2):
+# - Polymarket's market channel docs: "Send the text frame PING every 10
+#   seconds; the server replies with PONG." Kept as documented.
+# - Detection uses protocol-level ping/pong (answered in ~8 ms, tested
+#   2026-10-31): if a pong doesn't arrive within KEEPALIVE_TIMEOUT_SEC the
+#   library starts a close, waits CLOSE_TIMEOUT_SEC for the peer to confirm,
+#   then drops the socket and the subscribe loop reconnects. So a dead
+#   connection is detected within ~ping + timeout + close = ~50 s. A plain
+#   receive timeout would also drop healthy connections on quiet markets.
+HEARTBEAT_SEC = 10
+KEEPALIVE_PING_SEC = 20
+KEEPALIVE_TIMEOUT_SEC = 20
+CLOSE_TIMEOUT_SEC = 10
+
 
 async def watch_subscription(ws, pool, current_ids, changed):
     """Every RESUBSCRIBE_CHECK_SEC, reload the market selection. If it changed,
@@ -35,11 +49,12 @@ async def watch_subscription(ws, pool, current_ids, changed):
 
 
 async def heartbeat(ws):
-    """Send PING every 20 seconds to keep the connection alive"""
+    """Send the documented text PING every HEARTBEAT_SEC (10 s) to keep the
+    subscription alive. Liveness is checked by the protocol ping, not here."""
     try:
         while True:
             await ws.send("PING")
-            await asyncio.sleep(20)
+            await asyncio.sleep(HEARTBEAT_SEC)
     except asyncio.CancelledError:
         logger.debug("Heartbeat cancelled")
         raise
@@ -72,9 +87,10 @@ async def subscribe(writer, pool):
             
             async with websockets.connect(
                 url,
-                ping_interval=None,
+                ping_interval=KEEPALIVE_PING_SEC,
+                ping_timeout=KEEPALIVE_TIMEOUT_SEC,
                 max_size=8 * 1024 * 1024,
-                close_timeout=10 
+                close_timeout=CLOSE_TIMEOUT_SEC,
             ) as ws:
 # 3. Subscribe to assets
       

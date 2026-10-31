@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 import asyncpg
 import asyncio
 import os
-from writer import EliteZleekWriter, upsert_markets, run_backfill_loop, run_backfill
+from writer import EliteZleekWriter, upsert_markets, run_backfill_loop, newest_stored_trade, run_gap_backfill
 from clob_ws import subscribe
 import gamma_client
 import logging
@@ -90,14 +90,11 @@ async def main():
         logger.info("Database pool created successfully")
         redis_client = redis.from_url(REDIS_URL)
         writer = EliteZleekWriter(pool, redis_client)
-          # 1. Run large initial backfill (24 hours)
-        try:
-            logger.info("Running initial 24-hour backfill...")
-            await run_backfill(pool, writer)
-            logger.info("Initial backfill completed")
-        except Exception as e:
-            logger.error("Initial backfill failed: %s", e, exc_info=True)
+        # The gap to backfill starts at the newest trade stored before this
+        # restart; read it before any task can write new trades.
+        newest_trade_ts = await newest_stored_trade(pool)
         
+
         # Create all tasks
         writer_task = asyncio.create_task(
             writer.flush_loop(interval=5), 
@@ -133,6 +130,13 @@ async def main():
             name="tremor_loop"
         )
         
+        # One-shot, in the background so live capture isn't delayed. Not in the
+        # asyncio.wait() set below: finishing normally must not stop the worker.
+        gap_task = asyncio.create_task(
+            run_gap_backfill(pool, writer, newest_trade_ts),
+            name="gap_backfill"
+        )
+
         logger.info("All tasks started. Running indefinitely...")
         
         # Wait for any task to complete (or crash)

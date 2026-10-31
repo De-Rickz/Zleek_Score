@@ -17,6 +17,40 @@ uri = os.getenv("DATABASE_URL")
 BARS_LOOKBACK = timedelta(minutes=65)
 
 
+BARS_QUERY = """
+insert into bars_1m (market_id, bucket, open, high, low, close, volume_usd, trades_cnt)
+select
+    t.market_id,
+    date_trunc('minute', t.ts) as bucket,
+    (array_agg(t.price order by t.ts asc, t.id asc))[1] as open,
+    max(t.price) as high,
+    min(t.price) as low,
+    (array_agg(t.price order by t.ts desc, t.id desc))[1] as close,
+    sum(t.size_usd) as volume_usd,
+    count(*) as trades_cnt
+from trades t
+where t.ts >= $1 and t.ts < $2
+group by t.market_id, date_trunc('minute', t.ts)
+on conflict (market_id, bucket) do update
+set
+    open       = excluded.open,
+    high       = excluded.high,
+    low        = excluded.low,
+    close      = excluded.close,
+    volume_usd = excluded.volume_usd,
+    trades_cnt = excluded.trades_cnt
+where (bars_1m.trades_cnt, bars_1m.volume_usd, bars_1m.close)
+      is distinct from (excluded.trades_cnt, excluded.volume_usd, excluded.close);
+"""
+
+
+async def rebuild_bars(conn, start, end):
+    """(Re)build 1-minute bars from trades with ts in [start, end). Idempotent;
+    only bars whose values change are rewritten. t.id breaks timestamp ties so
+    open/close are deterministic."""
+    await conn.execute(BARS_QUERY, start, end)
+
+
 async def run_bars_job(pool):
     logger.info("Bars Job started")
     async with pool.acquire() as conn:
@@ -28,46 +62,11 @@ async def run_bars_job(pool):
 
         if t_start <= last_ts:
             return  # nothing to do
-        
-        logger.info("Load asset IDs started")
-        query = """
-        insert into bars_1m (
-            market_id,
-            bucket,
-            open,
-            high,
-            low,
-            close,
-            volume_usd,
-            trades_cnt
-        )
-        select
-            t.market_id,
-            date_trunc('minute', t.ts) as bucket,
-            (array_agg(t.price order by t.ts asc))[1] as open,
-            max(t.price) as high,
-            min(t.price) as low,
-            (array_agg(t.price order by t.ts desc))[1] as close,
-            sum(t.size_usd) as volume_usd,
-            count(*) as trades_cnt
-        from trades t
-        where t.ts >= $1 and t.ts < $2
-        group by t.market_id, date_trunc('minute', t.ts)
-        on conflict (market_id, bucket) do update
-        set
-            open       = excluded.open,
-            high       = excluded.high,
-            low        = excluded.low,
-            close      = excluded.close,
-            volume_usd = excluded.volume_usd,
-            trades_cnt = excluded.trades_cnt
-        where (bars_1m.trades_cnt, bars_1m.volume_usd, bars_1m.close)
-              is distinct from (excluded.trades_cnt, excluded.volume_usd, excluded.close);
-        """
+
         # Older last_ts (worker was down) still catches up the whole gap
         window_start = min(last_ts, t_now - BARS_LOOKBACK)
-        await conn.execute(query, window_start, t_start)
-        
+        await rebuild_bars(conn, window_start, t_start)
+
         await conn.execute(
             
             """

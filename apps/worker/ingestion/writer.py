@@ -5,11 +5,23 @@ import statistics
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from decimal import Decimal
+import asyncpg
 import httpx
 # 📦 High-performance async drivers
 
 
 logger = logging.getLogger("Ingestion.Writer")
+
+# Flush safety (ROADMAP phase 2): after this many consecutive failed batches,
+# insert row by row and move rows that can never be written to DEAD_LETTER_KEY,
+# so one bad row can't block every later flush.
+FLUSH_MAX_BATCH_FAILURES = 3
+DEAD_LETTER_KEY = "buffer:dead"
+# Errors that mean the row itself is bad (retrying can't help). Anything else
+# (connection lost, database down) keeps the row queued for the next flush.
+ROW_DATA_ERRORS = (asyncpg.exceptions.DataError,
+                   asyncpg.exceptions.IntegrityConstraintViolationError,
+                   ValueError, TypeError, KeyError, AttributeError)
 
 def coerce_dt(value):
     """
@@ -68,6 +80,10 @@ class EliteZleekWriter:
         
         # 🛡️ Bouncer state
         self.last_snapshot_time = {}
+
+        # Flush state: one flush at a time; consecutive whole-batch failures
+        self._flush_lock = asyncio.Lock()
+        self._batch_failures = 0
         
         # 📊 Telemetry
         self.write_lags = deque(maxlen=200)
@@ -148,31 +164,73 @@ class EliteZleekWriter:
     async def flush(self):
         """
         🚚 The Express Truck: Moves data from Redis to Postgres.
+
+        Items leave Redis only AFTER the Postgres transaction commits: each queue
+        is read with LRANGE, written, and then exactly those items are trimmed
+        from the tail (add_item pushes new items onto the head, so anything
+        queued during the flush stays). If the insert fails or the worker dies
+        mid-flush, everything is still queued and the next flush retries it;
+        REST_QUERY (ON CONFLICT tx_hash) and OB_QUERY (ON CONFLICT DO NOTHING on
+        the (market_id, ts) key) make the retry harmless. WS_QUERY has no unique
+        key, so trades without tx_hash could be written twice; a warning is
+        logged whenever any reach it (0 since 2026-10-28).
         """
-        pipe = self.redis.pipeline()
-        for key in [self.REDIS_REST, self.REDIS_WS, self.REDIS_SNAPS]:
-            pipe.lrange(key, 0, -1)
-            pipe.delete(key)
-        
-        results = await pipe.execute()
-        raw_rest, _, raw_ws, _, raw_snaps, _ = results
+        async with self._flush_lock:
+            queues = [(self.REDIS_REST, self.REST_QUERY, self._map_rest),
+                      (self.REDIS_WS, self.WS_QUERY, self._map_ws),
+                      (self.REDIS_SNAPS, self.OB_QUERY, self._map_snap)]
+            pipe = self.redis.pipeline()
+            for key, _, _ in queues:
+                pipe.lrange(key, 0, -1)
+            batches = await pipe.execute()
+            if not any(batches):
+                return
+            if batches[1]:
+                logger.warning("%d trade(s) without a transaction hash reached WS_QUERY "
+                               "(no dedupe key: a retried flush can store them twice)", len(batches[1]))
 
-        if not any([raw_rest, raw_ws, raw_snaps]):
-            return
+            try:
+                async with self.pool.acquire() as conn:
+                    async with conn.transaction():
+                        for (_, query, mapper), raw in zip(queues, batches):
+                            if raw:
+                                rows = [mapper(json.loads(r)) for r in reversed(raw)]
+                                await conn.executemany(query, rows)
+                self._batch_failures = 0
+            except Exception as e:
+                self._batch_failures += 1
+                if self._batch_failures < FLUSH_MAX_BATCH_FAILURES:
+                    raise  # nothing trimmed: flush_loop logs it and the next flush retries
+                logger.error("Flush failed %d times in a row (%s: %s); retrying row by row",
+                             self._batch_failures, type(e).__name__, e)
+                await self._flush_row_by_row(queues, batches)  # raises if the database is unreachable
+                self._batch_failures = 0
 
+            pipe = self.redis.pipeline()
+            for (key, _, _), raw in zip(queues, batches):
+                if raw:
+                    pipe.ltrim(key, 0, -(len(raw) + 1))  # drop exactly the items just written
+            await pipe.execute()
+            logger.info("✅ Database batch flush complete.")
+
+    async def _flush_row_by_row(self, queues, batches):
+        """Insert each row on its own; rows that fail with a data error go to
+        DEAD_LETTER_KEY with the error. A connection-level error stops here and
+        propagates, so nothing is trimmed or dead-lettered and the batch is
+        retried on the next flush."""
+        dead = []
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if raw_rest:
-                    rows = [self._map_rest(json.loads(r)) for r in reversed(raw_rest)]
-                    await conn.executemany(self.REST_QUERY, rows)
-                if raw_ws:
-                    rows = [self._map_ws(json.loads(r)) for r in reversed(raw_ws)]
-                    await conn.executemany(self.WS_QUERY, rows)
-                if raw_snaps:
-                    rows = [self._map_snap(json.loads(r)) for r in reversed(raw_snaps)]
-                    await conn.executemany(self.OB_QUERY, rows)
-        
-        logger.info("✅ Database batch flush complete.")
+            for (key, query, mapper), raw in zip(queues, batches):
+                for r in reversed(raw):
+                    text = r.decode() if isinstance(r, bytes) else r
+                    try:
+                        await conn.execute(query, *mapper(json.loads(text)))
+                    except ROW_DATA_ERRORS as e:
+                        dead.append(json.dumps({"queue": key, "error": f"{type(e).__name__}: {e}",
+                                                "item": text}))
+        if dead:
+            await self.redis.lpush(DEAD_LETTER_KEY, *dead)
+            logger.error("Moved %d unwritable row(s) to %s", len(dead), DEAD_LETTER_KEY)
 
     # --- 🗺️ Mapping Helpers ---
     def _map_rest(self, e):
@@ -193,7 +251,10 @@ class EliteZleekWriter:
                 float(e.get("ask_depth_usd", 0)), json.dumps(e.get("bids")),
                 json.dumps(e.get("asks")))
 
+    flush_interval_sec = 5
+
     async def flush_loop(self, interval=5):
+        self.flush_interval_sec = interval
         while True:
             await asyncio.sleep(interval)
             try:
@@ -275,13 +336,27 @@ DATA_API_URL = "https://data-api.polymarket.com"
 BACKFILL_PAGE_SIZE = 500
 BACKFILL_REQUEST_GAP_SEC = 0.5  # the Data API returns 429 after a few rapid requests
 
-async def fetch_public_trades(client, condition_id, cutoff_unix):
-    """Public trades for one market, newest first, back to cutoff_unix (epoch seconds)."""
-    trades, offset = [], 0
+def _trade_key(t):
+    return (t.get("transactionHash"), t.get("asset"), t.get("timestamp"), str(t.get("size")))
+
+async def fetch_public_trades(client, condition_id, cutoff_unix, end_unix=None, page_size=BACKFILL_PAGE_SIZE):
+    """
+    Public trades for one market with timestamp in [cutoff_unix, end_unix]
+    (epoch seconds; end defaults to now), newest first.
+
+    Pages by moving the Data API's `end` filter back to the oldest trade seen,
+    always at offset 0: the API rejects offsets above 10,000 ("max historical
+    trades offset of 10000 exceeded"), and busy markets pass that within a few
+    hours (10,518 trades in 3h on one market, 2026-10-31). Trades on the
+    boundary second come back twice and are dropped by key.
+    """
+    end = end_unix if end_unix is not None else int(datetime.now(timezone.utc).timestamp())
+    trades, seen = [], set()
     while True:
         for attempt in range(3):
             resp = await client.get("/trades", params={
-                "market": condition_id, "limit": BACKFILL_PAGE_SIZE, "offset": offset,
+                "market": condition_id, "limit": page_size, "offset": 0,
+                "start": cutoff_unix, "end": end,
             })
             if resp.status_code != 429:
                 break
@@ -290,10 +365,45 @@ async def fetch_public_trades(client, condition_id, cutoff_unix):
         page = resp.json()
         await asyncio.sleep(BACKFILL_REQUEST_GAP_SEC)
 
-        trades.extend(t for t in page if t.get("timestamp", 0) >= cutoff_unix)
-        if len(page) < BACKFILL_PAGE_SIZE or page[-1].get("timestamp", 0) < cutoff_unix:
+        new = [t for t in page if _trade_key(t) not in seen and t.get("timestamp", 0) >= cutoff_unix]
+        seen.update(_trade_key(t) for t in new)
+        trades.extend(new)
+        if len(page) < page_size:
             return trades
-        offset += len(page)
+        oldest = page[-1].get("timestamp", 0)
+        if new and oldest < end:
+            end = oldest  # normal case: the next page ends at the oldest second seen
+        else:
+            # A full page within one second: the cursor can't advance, so step
+            # past it. Only the rest of that one second is skipped.
+            logger.warning("Backfill %s: more than %d trades at %s; rest of that second skipped",
+                           condition_id, page_size, oldest)
+            end = oldest - 1
+        if end < cutoff_unix:
+            return trades
+
+async def queue_public_trades(writer, trades, asset_maps):
+    """Map Data API trades to YES terms and queue them for the writer. Returns
+    how many were queued (trades for tokens we don't know are skipped)."""
+    queued = 0
+    for trade in trades:
+        info = asset_maps.get(trade.get("asset"))
+        if info is None:
+            continue
+        raw_price = float(trade.get("price", 0))
+        price, side = to_yes_terms(raw_price, trade.get("side"), info[1])
+        ts = datetime.fromtimestamp(trade["timestamp"], tz=timezone.utc)
+        norm = {
+            "kind": "trade", "market_id": info[0], "asset_id": trade.get("asset"),
+            "ts": ts.isoformat(), "match_time": ts.isoformat(), "price": price,
+            # Data API size is in shares; the raw token price is USD per share
+            "size_usd": float(trade.get("size", 0)) * raw_price,
+            "side": side, "tx_hash": trade.get("transactionHash"), "raw": trade,
+            "ingest_ts": datetime.now(timezone.utc).isoformat(),
+        }
+        await writer.add_item(norm)
+        queued += 1
+    return queued
 
 async def run_backfill(pool, writer, hours_back=1):
     """
@@ -312,23 +422,8 @@ async def run_backfill(pool, writer, hours_back=1):
     async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
         for cond in conds:
             try:
-                for trade in await fetch_public_trades(client, cond, cutoff_unix):
-                    info = asset_maps.get(trade.get("asset"))
-                    if info is None:
-                        continue
-                    raw_price = float(trade.get("price", 0))
-                    price, side = to_yes_terms(raw_price, trade.get("side"), info[1])
-                    ts = datetime.fromtimestamp(trade["timestamp"], tz=timezone.utc)
-                    norm = {
-                        "kind": "trade", "market_id": info[0], "asset_id": trade.get("asset"),
-                        "ts": ts.isoformat(), "match_time": ts.isoformat(), "price": price,
-                        # Data API size is in shares; the raw token price is USD per share
-                        "size_usd": float(trade.get("size", 0)) * raw_price,
-                        "side": side, "tx_hash": trade.get("transactionHash"), "raw": trade,
-                        "ingest_ts": datetime.now(timezone.utc).isoformat(),
-                    }
-                    await writer.add_item(norm)
-                    queued += 1
+                queued += await queue_public_trades(
+                    writer, await fetch_public_trades(client, cond, cutoff_unix), asset_maps)
             except Exception as e:
                 logger.error(f"Backfill error for {cond}: {e}")
     logger.info("Backfill queued %d trades from %d markets", queued, len(conds))
@@ -344,3 +439,93 @@ async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
             logger.info("Periodic backfill completed")
         except Exception as e:
             logger.exception(f"Periodic backfill failed: {e}")
+
+
+# --- Startup gap backfill (ROADMAP phase 2) ---
+GAP_BACKFILL_CAP = timedelta(hours=48)   # never fetch more than this after an outage
+GAP_OVERLAP = timedelta(minutes=5)       # re-fetch a little before the newest stored trade
+GAP_PAGE_SIZE = 1000                     # the Data API accepts up to 10,000
+GAP_FLUSH_WAIT_SEC = 300                 # how long to wait for the writer to drain the queue
+
+def compute_gap_window(newest_trade_ts, now, cap=GAP_BACKFILL_CAP, overlap=GAP_OVERLAP):
+    """
+    Start of the startup backfill, and whether the cap cut it short.
+    None if there are no stored trades (fresh database: the periodic 1-hour
+    backfill covers it).
+    """
+    if newest_trade_ts is None:
+        return None
+    start = newest_trade_ts - overlap
+    if start < now - cap:
+        return now - cap, True
+    return start, False
+
+async def wait_for_writer_drain(writer, timeout_sec=GAP_FLUSH_WAIT_SEC, interval_sec=2):
+    """Wait until the flush loop has emptied the trade queue, then one more flush
+    interval so the last batch is committed. Returns False on timeout."""
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    while asyncio.get_running_loop().time() < deadline:
+        if await writer.redis.llen(writer.REDIS_REST) == 0:
+            await asyncio.sleep(writer.flush_interval_sec)
+            return True
+        await asyncio.sleep(interval_sec)
+    return False
+
+async def newest_stored_trade(pool):
+    """Read BEFORE the websocket and flush loop start: once they run, fresh live
+    trades make the gap look empty."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT max(ts) FROM trades")
+
+async def run_gap_backfill(pool, writer, newest_trade_ts):
+    """
+    Once at startup: fetch every market's public trades since newest_trade_ts
+    (from newest_stored_trade, minus GAP_OVERLAP, capped at GAP_BACKFILL_CAP),
+    then rebuild bars for that range. Runs in the background so the websocket
+    starts immediately.
+
+    - Websocket markets are NOT excluded (unlike the periodic backfill): the
+      websocket was down for the same gap. Live and backfilled trades both carry
+      tx_hash, so REST_QUERY's ON CONFLICT (tx_hash) dedupes any overlap.
+    - Bars must be rebuilt explicitly: the bars job's first run after a restart
+      happens before these trades are flushed, and later runs only look back
+      BARS_LOOKBACK (65 min).
+    """
+    from bars_jobs import rebuild_bars  # local import: bars_jobs is a sibling module
+    now = datetime.now(timezone.utc)
+    try:
+        newest = newest_trade_ts
+        window = compute_gap_window(newest, now)
+        if window is None:
+            logger.info("Gap backfill: no stored trades, nothing to fill")
+            return
+        start, capped = window
+        if capped:
+            logger.warning("Gap backfill capped at %s: trades between %s and %s are not recovered",
+                           GAP_BACKFILL_CAP, newest, start)
+        logger.info("Gap backfill: fetching trades from %s to %s", start, now)
+
+        asset_maps = await load_asset_maps(pool)
+        conds = await load_condition_ids_for_backfill(pool)  # no websocket exclusion, see above
+        start_unix, end_unix = int(start.timestamp()), int(now.timestamp())
+        queued = failed = 0
+        async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=30.0) as client:
+            for cond in conds:
+                try:
+                    trades = await fetch_public_trades(client, cond, start_unix, end_unix=end_unix,
+                                                       page_size=GAP_PAGE_SIZE)
+                    queued += await queue_public_trades(writer, trades, asset_maps)
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"Gap backfill error for {cond}: {e}")
+        logger.info("Gap backfill queued %d trades from %d markets (%d failed)", queued, len(conds), failed)
+
+        if not await wait_for_writer_drain(writer):
+            logger.error("Gap backfill: writer queue did not drain in %ss; bars for the gap not rebuilt",
+                         GAP_FLUSH_WAIT_SEC)
+            return
+        async with pool.acquire() as conn:
+            await rebuild_bars(conn, start, datetime.now(timezone.utc))
+        logger.info("Gap backfill: rebuilt bars from %s", start)
+    except Exception as e:
+        logger.exception(f"Gap backfill failed: {e}")
