@@ -375,9 +375,33 @@ on the copy (C, D, E should be 0; A and B depend on `now()` and look stale).
 Do it once now and after any TimescaleDB image upgrade (restores need the
 same TimescaleDB version: 2.31.0-pg16, pinned in `docker-compose.prod.yml`).
 
+**Off-instance copy** (installed 2026-11-02): with `ZLEEK_BACKUP_REMOTE` set,
+each run copies every local dump the bucket doesn't have yet with `rclone copy
+--size-only --immutable`, so a failed upload is retried the next night. The
+log line ends `offsite=ok|FAIL|off`; a failed upload keeps the local dump,
+logs `FAIL`, pings healthchecks `/fail` and exits 1.
+- Oracle Object Storage, compartment `zleek_backups`, private bucket
+  `zleek_db_backups`, objects under `daily/`. rclone remote `zleek-offsite`
+  (S3-compatible endpoint, `~/.config/rclone/rclone.conf`, mode 600).
+- Least privilege: user `zleek-backup` (Customer secret key only, no console
+  login) in group `zleek_backup_writers`, allowed only to read that bucket and
+  OBJECT_CREATE / OBJECT_INSPECT / OBJECT_READ in it. It cannot delete or
+  overwrite, so a compromised server can't wipe the copies (`rclone deletefile`
+  must fail with AccessDenied).
+- Retention: bucket lifecycle rules, run by Oracle itself (policy
+  `Allow service objectstorage-<region> to manage object-family in compartment
+  zleek_backups`): delete `daily/` objects after 30 days; delete uncommitted
+  multipart uploads after 2 days. Local disk keeps 7.
+- Crontab: `20 3 * * * ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
+  /home/ubuntu/bin/zleek-db-backup.sh >> /home/ubuntu/backups/zleek-db/cron.log 2>&1`
+- Restore from the bucket: `rclone copy zleek-offsite:zleek_db_backups/daily/<dump>
+  /tmp/restore/`, then the throwaway-container restore above.
+
+pg_dump warnings: the log's `WARN …` line holds the text. TimescaleDB's
+self-referencing catalog tables make pg_dump warn about circular foreign keys;
+that only affects data-only restores, not the full restore above.
+
 **Still open:**
-- An off-instance copy (Oracle Object Storage or any S3-compatible bucket via
-  `rclone`): a dump on the same disk doesn't survive losing the instance.
 - Optional: a healthchecks.io check for the backup job (period 1 day, grace
   2 h), set via `ZLEEK_BACKUP_HEALTHCHECK_URL` in the crontab, so a backup
   that silently stops running raises an alert.
