@@ -30,6 +30,8 @@
 - Postgres secrets use hex-only passwords; base64 characters break connection URLs.
 - Deploy order for data fixes: human restarts the worker first, then runs repairs, then rebuilds.
 - The websocket loads the token mapping (load_asset_maps) only when it connects. After any repair of markets.token_* columns, live trades and order books keep the old mapping until the next "Subscribed to N assets" in worker.log. Trades can be re-repaired from raw; ob_snapshots can't, so their cutoff is that subscribe time, not the restart (2026-10-30: restart 17:06:04, subscribe 17:24:17).
+- 2026-11-02, Oracle Cloud deploy: the VCN's default Security List only allowed ingress on 22. Ports 80/443 must be opened in the Security List (cloud firewall) as well as in ufw on the instance; with only ufw open, Caddy's ACME challenges (HTTP-01 and TLS-ALPN-01) timed out.
+- 2026-11-02, DNS: zleekin.com had a stale second A record (GoDaddy "WebsiteBuilder Site" parking page) next to the Oracle server's record. DNS round-robined between them, giving intermittent 403s during certificate issuance. Before relying on ACME, check that the domain resolves only to the server (`dig +short A zleekin.com`, and AAAA).
 
 ## Definition of done
 - Diff approved, test or acceptance query added, infra/TODO.md updated, and the deploy steps written out for the human.
