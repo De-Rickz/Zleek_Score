@@ -355,12 +355,29 @@ its own worker ran (plus up to 48h of backfill after a restart).
 ## 9. Backups
 
 Production's database is the only copy once the Mac is off.
-- Nightly `pg_dump -Fc` from the `db` container (cron on the host, like the
-  heartbeat), keep 7 days locally, and copy each dump off the server (Oracle
-  Object Storage, or any S3-compatible bucket via `rclone`). A dump that only
-  exists on the same disk doesn't survive losing the instance.
-- Restore test as in [section 4](#4-manual-checks) once now, then after any
-  TimescaleDB image upgrade (restores need the same TimescaleDB version).
-- Ping a second healthchecks.io check from the backup job, so a backup that
-  silently stops running raises an alert too.
 
+**Nightly on-disk dump** (installed as `~/bin/zleek-db-backup.sh`, source in
+`infra/backup/zleek-db-backup.sh`): `pg_dump -Fc` (compressed custom format)
+inside the `zleek_db` container, written to `~/backups/zleek-db/`, checked
+with `pg_restore --list` before it's kept, newest 7 kept. One line per run in
+`~/backups/zleek-db/backup.log` (`OK …` / `FAIL …` / `SKIP …`). A failed run
+removes its partial file and never deletes older dumps.
+
+Cron (server time is UTC): `20 3 * * *`, i.e. 03:20 GMT / 04:20 BST: UK
+night all year, and off the heartbeat's :00/:15/:30/:45 runs.
+
+**Prove a dump restores** (throwaway container, `--network none`, never
+production): restore the newest dump with
+`timescaledb_pre_restore()` / `pg_restore --no-owner --no-acl` /
+`timescaledb_post_restore()`, compare row counts with production up to the
+dump's newest trade, and run `apps/worker/scripts/acceptance_price_orientation.sql`
+on the copy (C, D, E should be 0; A and B depend on `now()` and look stale).
+Do it once now and after any TimescaleDB image upgrade (restores need the
+same TimescaleDB version: 2.31.0-pg16, pinned in `docker-compose.prod.yml`).
+
+**Still open:**
+- An off-instance copy (Oracle Object Storage or any S3-compatible bucket via
+  `rclone`): a dump on the same disk doesn't survive losing the instance.
+- Optional: a healthchecks.io check for the backup job (period 1 day, grace
+  2 h), set via `ZLEEK_BACKUP_HEALTHCHECK_URL` in the crontab, so a backup
+  that silently stops running raises an alert.
