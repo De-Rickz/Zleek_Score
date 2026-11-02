@@ -9,6 +9,12 @@ touches either running worker.
 Both workers keep running for the whole 48 hours. Don't switch the Mac off
 until [cutover](#5-cutover-criteria) passes.
 
+This document replaces the earlier `docs/vps-migration.md` plan (systemd
+units on a fresh VPS), which was never merged: production runs as a docker
+compose stack (db, redis, worker, web, caddy) on Oracle Cloud instead. Its
+still-accurate parts are in sections [6](#6-security-baseline-and-constraints)
+to [9](#9-backups).
+
 ## 0. Variables used below
 
 The production compose file isn't in the repo, so check these against
@@ -103,6 +109,8 @@ Reading the result:
   sleeping or restarting shows up here).
 - Per-market section: markets where production has bars/features/scores and
   the Mac doesn't, or the reverse, and markets where production has fewer bars.
+- Verdict: PASS when MISSED is at most 0.1% of the Mac's trades in markets
+  production tracked (`--max-missed-pct`, default 0.1); exit code 1 otherwise.
 
 Tested on 2026-11-02 against the Mac database, read-only: identical exports →
 0 missed, PASS; a copy with 30 trades and one whole market deleted → exactly
@@ -110,36 +118,36 @@ Tested on 2026-11-02 against the Mac database, read-only: identical exports →
 
 ## 3. Heartbeat on the server (cron, with external alerting)
 
-The Mac's heartbeat (`apps/worker/scripts/heartbeat.py`) can't run on the
-server as it is: it alerts through `osascript` (macOS notifications) and reads
-`DATABASE_URL` from `apps/web/.env.local`. Nobody watches the server's
-terminal, so alerts have to leave the machine.
+Nobody watches the server's terminal, so alerts have to leave the machine.
+`apps/worker/scripts/heartbeat.py` runs the same two checks as on the Mac
+(newest signal and newest live websocket trade, each within 15 min) and is
+configured by environment variables; on the Mac, with none set, it behaves
+exactly as before (macOS notification, `apps/worker/ingestion/heartbeat.log`).
 
-### 3a. Code change (small diff, for review before deploying)
-
-In `heartbeat.py`:
-1. `database_url()`: use `os.environ["DATABASE_URL"]` when set; keep the
-   `.env.local` file as the Mac fallback.
-2. `notify(message)`: when `ALERT_WEBHOOK_URL` is set, POST the message there
-   (push to phone); otherwise `osascript` as today (Mac unchanged).
-3. After each run, GET `HEALTHCHECK_PING_URL` on OK or `…/fail` on FAIL, so an
-   external dead-man's switch alerts when **no** ping arrives. That covers the
-   cases the heartbeat can't report itself: server down, cron stopped,
-   network broken.
-4. Log line to stdout (cron captures it) instead of a file inside the repo.
-
-Same two checks as on the Mac (signals within 15 min; live websocket trades
-within 15 min), same thresholds.
-
-### 3b. Alerting services (decision needed, both have free tiers)
-
-| Purpose | Suggested | Alternatives |
+| Variable | Value on the server | Effect |
 |---|---|---|
-| Push the alert text to your phone | [ntfy](https://ntfy.sh): POST to `https://ntfy.sh/<long-random-topic>`, subscribe in the ntfy app | Telegram bot, email via SMTP |
-| Alert when the heartbeat stops arriving | [healthchecks.io](https://healthchecks.io): one check, period 15 min, grace 10 min, notifies by email/push | Better Stack, Cronitor |
+| `DATABASE_URL` | read-only role (see [6](#6-security-baseline-and-constraints)), host `db` | the two checks |
+| `NTFY_URL` | `https://ntfy.sh/<long-random-topic>` | each alert pushed to your phone (ntfy app subscribed to the topic) |
+| `NTFY_TOKEN` | optional | bearer token, if the topic is access-controlled |
+| `HEALTHCHECK_URL` | `https://hc-ping.com/<check-uuid>` | every run pings it: `<url>` on OK, `<url>/fail` on FAIL, log line as the body |
+| `HEARTBEAT_LOG` | `-` | log line to stdout (cron or docker logs keep it) |
 
-Use a long random ntfy topic name (anyone who knows it can read it), or a
-self-hosted/authenticated topic.
+What each part catches:
+- **ntfy**: the worker crashed or went silent while the server is up. The
+  checks fail (no fresh signals, or no live trades), and you get a push
+  within one 15-min run.
+- **healthchecks.io**: the failures the heartbeat can't report itself: the
+  server is down, cron stopped, the heartbeat container can't start, the
+  network is broken. healthchecks.io alerts when no ping arrives within
+  period + grace. It also alerts on every `/fail` ping, so a FAIL reaches you
+  by both routes.
+
+Setup: one healthchecks.io check, period 15 min, grace 10 min, notifications
+to email and/or its ntfy integration. Use a long random ntfy topic name
+(anyone who knows it can subscribe), or an access-controlled topic with
+`NTFY_TOKEN`. Alert delivery problems go to stderr and never stop a run;
+`apps/worker/tests/test_heartbeat.py` covers OK, stale, database down, ntfy
+down, and the unchanged Mac path.
 
 ### 3c. How cron runs it
 
@@ -152,7 +160,7 @@ demand:
   heartbeat:
     image: <same image as the worker service>   # or build: same as worker
     profiles: ["cron"]            # never started by `up`; only by `run`
-    env_file: /etc/zleek/heartbeat.env   # DATABASE_URL (read-only role), ALERT_WEBHOOK_URL, HEALTHCHECK_PING_URL
+    env_file: .env.heartbeat      # gitignored: DATABASE_URL (read-only role), NTFY_URL, HEALTHCHECK_URL, HEARTBEAT_LOG=-
     command: ["python", "<path in image>/apps/worker/scripts/heartbeat.py"]
     depends_on: [db]
 ```
@@ -165,14 +173,14 @@ Crontab for the deploy user (`crontab -e`):
 
 - `flock -n` stops overlapping runs if one hangs.
 - `--no-deps` avoids (re)starting `db`; `--rm` removes the container afterwards.
-- `DATABASE_URL` should use a **read-only role** (e.g. `zleek_web`, created as in `docs/vps-migration.md` step 3). The heartbeat only reads.
+- `DATABASE_URL` should use a **read-only role** ([section 6](#6-security-baseline-and-constraints)). The heartbeat only reads.
 - Rotate `~/zleek-heartbeat.log` with logrotate, or drop the redirect and rely on healthchecks.io's history.
 
 **Verify:** run the cron line by hand (expect one `OK signals=… trades=…`
 line and a green check on healthchecks.io); stop the cron job for longer than
-the grace period (expect the "down" notification); test the failure path with
-a temporary `HEALTHCHECK_PING_URL`/`ALERT_WEBHOOK_URL` against a *copy* of the
-check rather than stopping the worker.
+the grace period (expect the "down" notification); test the alert path by
+running the heartbeat once by hand with `NTFY_URL` pointed at a test topic and
+`HEALTHCHECK_URL` at a second, test check, rather than stopping the worker.
 
 ## 4. Manual checks
 
@@ -216,12 +224,121 @@ check rather than stopping the worker.
 ## 5. Cutover criteria
 
 Switch production to system of record (and stop the Mac worker,
-`docs/vps-migration.md` step 8) only when all hold at 48h:
+[section 7](#7-switching-off-the-mac-worker)) only when all hold at 48h:
 
 - [ ] Acceptance A-E as in section 1, at ~24h and at 48h.
-- [ ] Funnel comparison over a full 24h window: MISSED within the agreed limit
-      (see decisions), no cluster of missing hours, scored-market sets similar.
+- [ ] Funnel comparison over a full 24h window: verdict PASS at the default
+      0.1% MISSED limit, no cluster of missing hours, scored-market sets similar.
+      Any MISSED trade is explained before cutover.
 - [ ] Heartbeat: 48h of OK runs on the server, healthchecks.io green, one
       deliberate "down" alert received on the phone.
-- [ ] Memory/disk headroom recorded; restore test passed; a scheduled backup exists.
+- [ ] Memory/disk headroom recorded; restore test passed; a scheduled backup exists ([section 9](#9-backups)).
+- [ ] The worker and the heartbeat use least-privilege roles, not `postgres` ([section 6](#6-security-baseline-and-constraints)).
 - [ ] Site loads over mobile data with a valid certificate; only expected ports open.
+
+## 6. Security baseline and constraints
+
+Carried over from the earlier plan, adapted to the docker compose deploy.
+
+**Network**
+- Cloud firewall (VCN Security List) **and** ufw on the instance: ingress
+  22, 80, 443 only. Both layers are needed (CLAUDE.md, 2026-11-02 gotcha).
+- Postgres and Redis must not be reachable from outside. Best: no `ports:`
+  for `db` and `redis` at all (internal docker network only). If a port is
+  ever published for maintenance, bind it to `127.0.0.1`: **Docker-published
+  ports bypass ufw**.
+- Redis with a password (`requirepass`) even on the internal network, and
+  `--appendonly yes` so queued items survive a Redis restart (the flush only
+  removes items after the Postgres commit, so a persisted queue loses nothing).
+- SSH: keys only, no root login, no password authentication.
+
+**Secrets**
+- Credentials live only in gitignored env files on the server (`.env`,
+  `.env.prod`, `.env.heartbeat`); compose files, Caddyfile and Dockerfiles in
+  the repo hold none.
+- Hex-only passwords (`openssl rand -hex 32`): base64 characters break
+  connection URLs (CLAUDE.md gotcha).
+- Not needed anywhere: `POLYMARKET_WALLET_KEY`, `FUNDER_ADDRESS`.
+  `ingestion/clob_client.py` and `py-clob-client` are unused since the Data API
+  backfill (nothing imports them) and can be removed.
+
+**Least-privilege roles** (the Mac's worker also runs as `postgres`; don't
+carry that over). Run once as `postgres` with the passwords passed in, not
+committed:
+```sql
+CREATE ROLE zleek_worker LOGIN PASSWORD :'worker_pw';
+GRANT USAGE ON SCHEMA public TO zleek_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO zleek_worker;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO zleek_worker;
+
+CREATE ROLE zleek_web LOGIN PASSWORD :'web_pw';          -- web app and heartbeat
+GRANT USAGE ON SCHEMA public TO zleek_web;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO zleek_web;  -- incl. bars_state
+ALTER ROLE zleek_web SET default_transaction_read_only = on;
+```
+```sh
+$PROD exec -T "$DB" psql -U postgres -v worker_pw=... -v web_pw=... < roles.sql
+```
+Grants on a hypertable also apply to its chunks. Switching the running worker
+to `zleek_worker` is a restart with a new `DATABASE_URL`, so do it as a planned
+step, not during the parallel run.
+
+**Logs.** Docker's default `json-file` logging is unbounded. Cap it per service
+(`logging: {driver: json-file, options: {max-size: "50m", max-file: "5"}}`),
+or the worker's per-trade log lines fill the disk the way `worker.log` grew on
+the Mac. `scripts/check_multifill_collisions.py` Check 1 reads a log file: feed
+it `$PROD logs --no-color --since 168h worker > /tmp/worker.log` and pass
+`--log /tmp/worker.log`.
+
+**Constraints that still hold**
+- The schema comes from `infra/sql/schema.sql` + `infra/sql/migrations/domain_model.sql`
+  (TimescaleDB image; they reproduce the Mac's schema exactly, checked 2026-10-31).
+  Init scripts run only on an empty volume.
+- The startup gap backfill refills at most 48h after any worker restart; longer
+  gaps are lost.
+- Each worker picks its markets from its own database, so Mac and production
+  coverage differ somewhat in the tail (section 2).
+- Stray repo-root file `nly headline, recent-window z, … display"` (accidental
+  `git diff` output in `a04e4fc`, no secrets): delete it.
+
+## 7. Switching off the Mac worker
+
+Only after [cutover criteria](#5-cutover-criteria) pass:
+```sh
+launchctl bootout gui/$(id -u)/com.zleek.worker
+launchctl bootout gui/$(id -u)/com.zleek.heartbeat
+```
+- Keep both plists in `~/Library/LaunchAgents/` and the Mac's Postgres data
+  (`postgres_data/`) for a 2-week rollback window. `docker compose stop` frees
+  the Mac; don't `docker compose down -v`.
+- Optional: restore Mac sleep (`sudo pmset -c sleep 10`).
+- Then close the Mac-only `infra/TODO.md` items (Mac sleep; `worker.log`
+  rotation becomes the docker log cap above).
+
+**Verify:** `launchctl print gui/$(id -u)/com.zleek.worker` reports the
+service isn't found; no new lines in the Mac's `worker.log`; production keeps
+going (heartbeat green).
+
+## 8. Rollback
+
+| Situation | Rollback |
+|---|---|
+| Parallel run shows a problem | Nothing to roll back: the Mac never stopped. Fix production, or `$PROD stop worker` while investigating. |
+| After cutover, within the 2-week window | On the Mac: `docker compose start`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zleek.worker.plist` (and the heartbeat). The startup gap backfill refills up to 48h of trades in the Mac's database; anything older than that is missing there. |
+| After the window | The Mac's data is stale; recover production from its backups (section 9). |
+
+Data never moves between the two databases; each is complete for the time
+its own worker ran (plus up to 48h of backfill after a restart).
+
+## 9. Backups
+
+Production's database is the only copy once the Mac is off.
+- Nightly `pg_dump -Fc` from the `db` container (cron on the host, like the
+  heartbeat), keep 7 days locally, and copy each dump off the server (Oracle
+  Object Storage, or any S3-compatible bucket via `rclone`). A dump that only
+  exists on the same disk doesn't survive losing the instance.
+- Restore test as in [section 4](#4-manual-checks) once now, then after any
+  TimescaleDB image upgrade (restores need the same TimescaleDB version).
+- Ping a second healthchecks.io check from the backup job, so a backup that
+  silently stops running raises an alert too.
+

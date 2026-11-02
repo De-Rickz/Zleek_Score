@@ -1,5 +1,6 @@
 """
-Worker heartbeat, run every 15 min by launchd (com.zleek.heartbeat).
+Worker heartbeat, run every 15 min: by launchd on the Mac (com.zleek.heartbeat),
+by cron in a one-off container on the production server (docs/parallel-run.md).
 
 Two checks, read-only via the zleek_web role (the frontend's DATABASE_URL in
 apps/web/.env.local); each shows its own macOS notification when stale:
@@ -15,22 +16,42 @@ apps/web/.env.local); each shows its own macOS notification when stale:
 After the Mac sleeps both checks fail together on wake; that is the worker
 being suspended, not a websocket fault.
 
-Every run appends one short line to apps/worker/ingestion/heartbeat.log.
+Every run writes one short line: to HEARTBEAT_LOG (a path, or "-" for stdout),
+default apps/worker/ingestion/heartbeat.log.
+
+Alerting, configured by environment (all optional):
+  DATABASE_URL     read-only connection string. Default: apps/web/.env.local (Mac).
+  NTFY_URL         e.g. https://ntfy.sh/<long-random-topic>. When set, each alert
+                   is pushed there (phone). Without it: macOS notification on a
+                   Mac, stderr elsewhere.
+  NTFY_TOKEN       bearer token, for an access-controlled topic.
+  HEALTHCHECK_URL  e.g. https://hc-ping.com/<uuid>. Every run pings it: <url>
+                   when OK, <url>/fail when a check fails, with the log line as
+                   the body. healthchecks.io then alerts on a FAIL ping AND
+                   when no ping arrives at all (server down, cron stopped,
+                   heartbeat crashed): the failures this script can't report
+                   itself.
+Alert delivery failures are written to stderr and never stop the run.
 """
 import asyncio
 import os
 import subprocess
+import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 ENV_FILE = os.path.join(ROOT, "apps", "web", ".env.local")
-LOG_FILE = os.path.join(ROOT, "apps", "worker", "ingestion", "heartbeat.log")
+LOG_FILE = os.environ.get("HEARTBEAT_LOG") or os.path.join(ROOT, "apps", "worker", "ingestion", "heartbeat.log")
 STALE_AFTER = timedelta(minutes=15)
+HTTP_TIMEOUT_SEC = 10
 
 
 def database_url():
+    if os.environ.get("DATABASE_URL"):
+        return os.environ["DATABASE_URL"]
     with open(ENV_FILE) as f:
         for line in f:
             if line.startswith("DATABASE_URL="):
@@ -52,18 +73,49 @@ async def newest_timestamps():
         await conn.close()
 
 
+def _http(url, data=None, headers=None):
+    """POST (with data) or GET; delivery problems go to stderr, never raise."""
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers or {}, method="POST" if data is not None else "GET")
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            resp.read()
+    except Exception as e:
+        print(f"heartbeat: could not reach {url.split('?')[0]}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def notify(message):
-    # Message passed as an argument, not spliced into the AppleScript source.
-    subprocess.run(["osascript",
-                    "-e", "on run argv",
-                    "-e", 'display notification (item 1 of argv) with title "Zleek Score"',
-                    "-e", "end run", message], check=False, timeout=10)
+    ntfy = os.environ.get("NTFY_URL")
+    if ntfy:
+        headers = {"Title": "Zleek Score", "Priority": "high", "Tags": "warning"}
+        if os.environ.get("NTFY_TOKEN"):
+            headers["Authorization"] = f"Bearer {os.environ['NTFY_TOKEN']}"
+        _http(ntfy, data=message.encode(), headers=headers)
+    elif sys.platform == "darwin":
+        # Message passed as an argument, not spliced into the AppleScript source.
+        subprocess.run(["osascript",
+                        "-e", "on run argv",
+                        "-e", 'display notification (item 1 of argv) with title "Zleek Score"',
+                        "-e", "end run", message], check=False, timeout=10)
+    else:
+        print(f"heartbeat ALERT (no NTFY_URL set): {message}", file=sys.stderr)
+
+
+def ping_healthcheck(ok, line):
+    """Dead-man's switch: <url> on OK, <url>/fail on FAIL, log line as body."""
+    url = os.environ.get("HEALTHCHECK_URL")
+    if url:
+        _http(url.rstrip("/") + ("" if ok else "/fail"), data=line.encode())
 
 
 def log(status, detail):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{now} {status} {detail}\n")
+    line = f"{now} {status} {detail}"
+    if LOG_FILE == "-":
+        print(line, flush=True)
+    else:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    return line
 
 
 CHECKS = {
@@ -79,8 +131,9 @@ def main():
     try:
         newest = dict(zip(CHECKS, asyncio.run(newest_timestamps())))
     except Exception as e:
-        log("FAIL", f"db_error={type(e).__name__}")
+        line = log("FAIL", f"db_error={type(e).__name__}")
         notify(f"Zleek Score heartbeat can't reach the database ({type(e).__name__})")
+        ping_healthcheck(False, line)
         return
 
     now = datetime.now(timezone.utc)
@@ -101,7 +154,8 @@ def main():
         else:
             parts.append(f"{name}={gap_min}m")
     # e.g. "OK signals=3m trades=0m" or "FAIL signals=3m trades=42m!"
-    log("FAIL" if failed else "OK", " ".join(parts))
+    line = log("FAIL" if failed else "OK", " ".join(parts))
+    ping_healthcheck(not failed, line)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,8 @@ classified by its market:
     volume) and backfill markets (top 200 by liquidity) from its own markets
     table, so the two sets can differ, mostly in the tail.
 Exit code 1 if MISSED exceeds --max-missed-pct of the Mac's trades in markets
-production tracked (default 0.5%), else 0.
+production tracked (default 0.1%: data correctness comes first, and any
+missed trade in a tracked market should be explained), else 0.
 """
 import argparse
 import csv
@@ -52,7 +53,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mac_trades"); ap.add_argument("prod_trades")
     ap.add_argument("mac_markets"); ap.add_argument("prod_markets")
-    ap.add_argument("--max-missed-pct", type=float, default=0.5)
+    ap.add_argument("--max-missed-pct", type=float, default=0.1)
     ap.add_argument("--top", type=int, default=10)
     a = ap.parse_args()
 
