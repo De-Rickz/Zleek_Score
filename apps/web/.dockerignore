@@ -1,0 +1,8 @@
+# Keep secrets and local build/runtime artefacts out of the image build context.
+# Patterns are relative to the context root (this directory), so **/ is needed
+# to also match nested files, e.g. ingestion/.env.prod.
+**/.env*
+**/.venv
+**/*.log
+**/node_modules
+**/.next

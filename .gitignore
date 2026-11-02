@@ -33,6 +33,10 @@ ENV/
 /Zleek_Score/
 .env.local
 .env
+# Any env file, at any depth (e.g. apps/worker/ingestion/.env.prod with the
+# Postgres password, apps/worker/.env.heartbeat), except committed templates.
+.env.*
+!.env.example
 
 # IDEs
 .vscode/

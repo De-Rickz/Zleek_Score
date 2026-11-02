@@ -219,7 +219,7 @@ running the heartbeat once by hand with `NTFY_URL` pointed at a test topic and
       ```sh
       $PROD exec -T "$DB" pg_dump -U postgres -Fc "$PGDATABASE" > /tmp/zleek-test.dump   # postgres: the dump must read every table
       docker run -d --name zleek-restore-test -e POSTGRES_PASSWORD=restoretest \
-             timescale/timescaledb:latest-pg16   # must match prod's TimescaleDB version: check with SELECT extversion FROM pg_extension WHERE extname='timescaledb'
+             timescale/timescaledb:2.31.0-pg16   # same tag as docker-compose.prod.yml: restores need the same TimescaleDB version
       docker exec -i zleek-restore-test psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS timescaledb; SELECT timescaledb_pre_restore();"
       docker exec -i zleek-restore-test pg_restore -U postgres -d postgres --no-owner < /tmp/zleek-test.dump
       docker exec -i zleek-restore-test psql -U postgres -c "SELECT timescaledb_post_restore();"
