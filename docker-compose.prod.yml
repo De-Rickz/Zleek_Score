@@ -1,0 +1,86 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: zleek_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - TS_TUNE_MEMORY=2GB
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./infra/sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./infra/sql/migrations/domain_model.sql:/docker-entrypoint-initdb.d/02_domain_model.sql
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: zleek_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - ./redis_data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build:
+      context: ./apps/worker
+    container_name: zleek_worker
+    restart: unless-stopped
+    env_file:
+      - ./apps/worker/ingestion/.env.prod
+    depends_on:
+      - db
+      - redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        DATABASE_URL: ${DATABASE_URL}
+    container_name: zleek_web
+    restart: unless-stopped
+    env_file:
+      - ./apps/web/.env.prod
+    depends_on:
+      - db
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: zleek_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

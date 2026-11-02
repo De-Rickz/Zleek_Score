@@ -1,0 +1,3 @@
+zleekin.com, www.zleekin.com {
+    reverse_proxy web:3000
+}

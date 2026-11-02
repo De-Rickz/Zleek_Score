@@ -17,28 +17,32 @@ to [9](#9-backups).
 
 ## 0. Variables used below
 
-The production compose file isn't in the repo, so check these against
-`docker-compose.prod.yml` on the server and adjust once:
+Confirmed against `docker-compose.prod.yml` (now in the repo, 2026-11-02):
+services `db`, `redis`, `worker`, `web`, `caddy`; `POSTGRES_USER` and
+`POSTGRES_DB` are not set, so both default to `postgres`. `db` and `redis`
+publish no ports (internal docker network only).
 
 ```sh
-# on the Oracle server, in the directory with docker-compose.prod.yml
+# on the Oracle server, in the repo checkout that holds docker-compose.prod.yml
 PROD="docker compose -f docker-compose.prod.yml"
-DB=db                 # the Postgres service name (you listed: db, redis, worker, web, caddy)
-PGUSER=postgres       # check POSTGRES_USER in docker-compose.prod.yml (default: postgres)
-PGDATABASE=postgres   # check POSTGRES_DB (default: same as the user)
-REPO=~/Zleek_Score    # path of the repo checkout on the server (for the .sql files)
+DB=db
+PGDATABASE=postgres
+REPO=$PWD
 
-# read-only psql into the db container: every statement runs in a read-only transaction
+# read-only psql into the db container, as the read-only zleek_web role, with
+# every statement in a read-only transaction on top
 psql_ro() { $PROD exec -T -e PGOPTIONS='-c default_transaction_read_only=on' "$DB" \
-              psql -U "$PGUSER" -d "$PGDATABASE" -X -v ON_ERROR_STOP=1 "$@"; }
+              psql -U zleek_web -d "$PGDATABASE" -X -v ON_ERROR_STOP=1 "$@"; }
 ```
 
-On the Mac, the same function with `PROD="docker compose"` in the repo root,
-`DB=db`, `PGUSER=postgres`, `PGDATABASE=postgres`.
+`psql` connects over the container's local socket, which the Postgres image
+trusts, so no password is needed and nothing needs installing on the host. If
+`zleek_web` lacks SELECT on a table a query needs, that query fails with
+"permission denied" (nothing is changed); use `-U postgres` for that one, the
+read-only transaction still applies.
 
-`PGOPTIONS=default_transaction_read_only=on` makes Postgres reject any write in
-that session, so even the superuser can't change data by accident. (`psql` runs
-inside the db container, so nothing needs installing on the host.)
+On the Mac: the same function with `PROD="docker compose"` in the repo root
+(`zleek_web` exists there too).
 
 ## 1. Acceptance queries A-E on production
 
@@ -158,22 +162,40 @@ demand:
 
 ```yaml
   heartbeat:
-    image: <same image as the worker service>   # or build: same as worker
-    profiles: ["cron"]            # never started by `up`; only by `run`
-    env_file: .env.heartbeat      # gitignored: DATABASE_URL (read-only role), NTFY_URL, HEALTHCHECK_URL, HEARTBEAT_LOG=-
-    command: ["python", "<path in image>/apps/worker/scripts/heartbeat.py"]
-    depends_on: [db]
+    build:
+      context: ./apps/worker
+    image: zleek-heartbeat      # its own image: building it never changes the worker's image or container
+    profiles: ["cron"]          # never started by `up`; only by `run`
+    env_file:
+      - ./apps/worker/.env.heartbeat   # not committed, see below
+    command: ["python", "/app/scripts/heartbeat.py"]
+    depends_on:
+      - db
 ```
+
+`./apps/worker/.env.heartbeat` (on the server only; make sure it's gitignored):
+```sh
+DATABASE_URL=postgresql://zleek_web:<zleek_web password>@db:5432/postgres   # read-only role, never postgres
+NTFY_URL=https://ntfy.sh/<long-random-topic>
+HEALTHCHECK_URL=https://hc-ping.com/<check-uuid>
+HEARTBEAT_LOG=-
+```
+
+Build the heartbeat image once the branch with the new `heartbeat.py` is on
+the server: `$PROD --profile cron build heartbeat`. That builds only
+`zleek-heartbeat`; the running worker keeps its own image and isn't
+restarted. (A later `$PROD up -d --build` rebuilds and restarts the worker
+too; do that only when you mean to.)
 
 Crontab for the deploy user (`crontab -e`):
 
 ```cron
-*/15 * * * * cd /path/to/compose && flock -n /tmp/zleek-heartbeat.lock docker compose -f docker-compose.prod.yml run --rm --no-deps heartbeat >> $HOME/zleek-heartbeat.log 2>&1
+*/15 * * * * cd /path/to/repo && flock -n /tmp/zleek-heartbeat.lock docker compose -f docker-compose.prod.yml run --rm --no-deps heartbeat >> $HOME/zleek-heartbeat.log 2>&1
 ```
 
 - `flock -n` stops overlapping runs if one hangs.
 - `--no-deps` avoids (re)starting `db`; `--rm` removes the container afterwards.
-- `DATABASE_URL` should use a **read-only role** ([section 6](#6-security-baseline-and-constraints)). The heartbeat only reads.
+- `DATABASE_URL` uses `zleek_web` (read-only, non-superuser, exists on production). The heartbeat only reads.
 - Rotate `~/zleek-heartbeat.log` with logrotate, or drop the redirect and rely on healthchecks.io's history.
 
 **Verify:** run the cron line by hand (expect one `OK signals=… trades=…`
@@ -195,9 +217,9 @@ running the heartbeat once by hand with `NTFY_URL` pointed at a test topic and
 - [ ] **Backup restore test** (uses a throwaway container; doesn't touch the
       running ones):
       ```sh
-      $PROD exec -T "$DB" pg_dump -U "$PGUSER" -Fc "$PGDATABASE" > /tmp/zleek-test.dump
+      $PROD exec -T "$DB" pg_dump -U postgres -Fc "$PGDATABASE" > /tmp/zleek-test.dump   # postgres: the dump must read every table
       docker run -d --name zleek-restore-test -e POSTGRES_PASSWORD=restoretest \
-             timescale/timescaledb:<same tag as prod>     # same TimescaleDB version, or restore fails
+             timescale/timescaledb:latest-pg16   # must match prod's TimescaleDB version: check with SELECT extversion FROM pg_extension WHERE extname='timescaledb'
       docker exec -i zleek-restore-test psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS timescaledb; SELECT timescaledb_pre_restore();"
       docker exec -i zleek-restore-test pg_restore -U postgres -d postgres --no-owner < /tmp/zleek-test.dump
       docker exec -i zleek-restore-test psql -U postgres -c "SELECT timescaledb_post_restore();"
