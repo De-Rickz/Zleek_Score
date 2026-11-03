@@ -23,16 +23,16 @@ export default async function Home() {
       <h1 className="mb-4 text-2xl font-semibold">Markets by Tremor Score</h1>
 
       {stale && (
-        <p className="mb-4 rounded bg-amber-100 p-3 text-sm text-amber-900">
+        <p className="mb-4 rounded bg-warn-bg p-3 text-sm text-warn-fg">
           Newest score is {timeAgo(newest)}. The worker may be down.
         </p>
       )}
 
       {markets.length === 0 ? (
-        <p className="text-neutral-500">No scored markets yet.</p>
+        <p className="text-muted">No scored markets yet.</p>
       ) : (
         <table className="w-full text-sm">
-          <thead className="text-left text-neutral-500">
+          <thead className="text-left text-muted">
             <tr>
               <th className="py-2">Market</th>
               <th>Category</th>
@@ -52,7 +52,7 @@ export default async function Home() {
                 <td>{m.category ?? '—'}</td>
                 <td className="text-right tabular-nums">{usd(m.liquidity_usd)}</td>
                 <td className="text-right font-medium tabular-nums">{fixed(m.tremor_score, 0)}</td>
-                <td className="text-right text-neutral-500">{timeAgo(m.scored_at_ms)}</td>
+                <td className="text-right text-muted">{timeAgo(m.scored_at_ms)}</td>
               </tr>
             ))}
           </tbody>

@@ -11,11 +11,17 @@ Chart.register(BarController, BarElement, LineController, LineElement, PointElem
 
 type Point = { bucket_ms: number; close: number; volume_usd: number }
 
+// Colours come from the CSS tokens in globals.css (light/dark, contrast-checked);
+// the chart is rebuilt on every poll, so a theme switch is picked up within 10 s.
+const token = (name: string) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+
 export default function PriceChart({ bars }: { bars: Point[] }) {
   const ref = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
     if (!ref.current) return
+    const axis = token('--chart-axis'), grid = token('--chart-grid')
     const chart = new Chart(ref.current, {
       type: 'bar',
       data: {
@@ -26,18 +32,20 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
         datasets: [
           { type: 'line', label: 'Close', data: bars.map((b) => b.close),
             yAxisID: 'y', pointRadius: 0, borderWidth: 2,
-            borderColor: '#3b82f6', backgroundColor: '#3b82f6' },
+            borderColor: token('--chart-price'), backgroundColor: token('--chart-price') },
           { type: 'bar', label: 'Volume (USD)', data: bars.map((b) => b.volume_usd),
-            yAxisID: 'y1', backgroundColor: 'rgba(148, 163, 184, 0.5)' },
+            yAxisID: 'y1', backgroundColor: token('--chart-volume') },
         ],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false, // chart is rebuilt on each poll; animation would flicker
+        color: axis, // legend text
         scales: {
-          y: { position: 'left' },
-          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } },
+          x: { ticks: { color: axis }, grid: { color: grid } },
+          y: { position: 'left', ticks: { color: axis }, grid: { color: grid } },
+          y1: { position: 'right', beginAtZero: true, ticks: { color: axis }, grid: { drawOnChartArea: false } },
         },
       },
     })

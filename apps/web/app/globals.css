@@ -1,26 +1,61 @@
 @import "tailwindcss";
 
+/* Colour tokens. Every text/background pair is at least 4.5:1 (WCAG AA) in
+   both modes, checked against Tailwind's own colour values:
+   muted 4.73 light / 7.63 dark, warning 8.17 / 12.03. */
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --muted: var(--color-neutral-500);       /* secondary text */
+  --line: var(--color-neutral-200);        /* borders, table rules */
+  --skeleton: var(--color-neutral-100);
+  --warn-bg: var(--color-amber-100);
+  --warn-fg: var(--color-amber-900);
+  --chart-axis: var(--color-neutral-600);  /* 7.80 on white */
+  --chart-grid: var(--color-neutral-100);
+  --chart-price: var(--color-blue-600);
+  --chart-volume: var(--color-neutral-500); /* bars: 4.73, >= 3:1 for graphics */
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --muted: var(--color-neutral-400);
+    --line: var(--color-neutral-800);
+    --skeleton: var(--color-neutral-900);
+    --warn-bg: var(--color-amber-950);
+    --warn-fg: var(--color-amber-200);
+    --chart-axis: var(--color-neutral-400); /* 7.63 on #0a0a0a */
+    --chart-grid: var(--color-neutral-900);
+    --chart-price: var(--color-blue-400);
+    --chart-volume: var(--color-neutral-500); /* 4.18 on #0a0a0a */
   }
 }
 
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-skeleton: var(--skeleton);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-fg: var(--warn-fg);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Tailwind v4 borders default to currentColor (full text colour); use the
+   quieter --line everywhere instead. */
+@layer base {
+  *, ::after, ::before, ::backdrop, ::file-selector-button {
+    border-color: var(--line);
+  }
+}
+
+/* No font-family here: Tailwind's base styles already apply --font-sans
+   (Geist, loaded in app/layout.tsx). */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
 }
