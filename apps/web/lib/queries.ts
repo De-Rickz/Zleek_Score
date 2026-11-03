@@ -3,6 +3,7 @@
 import { cache } from 'react'
 import { sql } from './db'
 import type { Bar, Features, Market, MarketRow, Signal, Trade } from './types'
+import type { PriceChangeRow } from './priceChange'
 
 // postgres.js returns array/row subclasses; hand Next plain objects.
 const plain = <T extends object>(rows: readonly T[]): T[] =>
@@ -97,4 +98,22 @@ export async function getTraces(marketIds: string[]) {
   for (const r of prior) traces.get(r.market_id)!.prior = r.close
   for (const r of points) traces.get(r.market_id)!.points.push({ t: r.t, close: r.close })
   return traces
+}
+
+// 1-hour price change inputs for one market (see lib/priceChange.ts).
+export async function getPriceChangeRow(marketId: string): Promise<PriceChangeRow> {
+  const rows = await sql<PriceChangeRow[]>`
+    SELECT cur.close::float8 AS cur_close, ref.close::float8 AS ref_close,
+           (extract(epoch FROM ref.bucket) * 1000)::float8 AS ref_ms
+    FROM (SELECT 1) one
+    LEFT JOIN LATERAL (
+      SELECT close FROM bars_1m
+      WHERE market_id = ${marketId} AND bucket > now() - interval '60 minutes'
+      ORDER BY bucket DESC LIMIT 1) cur ON true
+    LEFT JOIN LATERAL (
+      SELECT close, bucket FROM bars_1m
+      WHERE market_id = ${marketId}
+        AND bucket <= now() - interval '60 minutes' AND bucket > now() - interval '25 hours'
+      ORDER BY bucket DESC LIMIT 1) ref ON true`
+  return { ...rows[0] }
 }

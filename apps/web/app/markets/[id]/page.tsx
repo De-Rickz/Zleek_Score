@@ -2,7 +2,8 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { getBars, getLatestFeatures, getMarket, getRecentTrades, getSignal } from '@/lib/queries'
+import { getBars, getLatestFeatures, getMarket, getPriceChangeRow, getRecentTrades, getSignal } from '@/lib/queries'
+import { describeChange } from '@/lib/priceChange'
 import { fixed, timeAgo, usd } from '@/lib/format'
 import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
@@ -25,9 +26,11 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   const market = await getMarket(id)
   if (!market) notFound()
 
-  const [signal, features, bars, trades] = await Promise.all([
-    getSignal(id), getLatestFeatures(id), getBars(id), getRecentTrades(id),
+  const [signal, features, bars, trades, changeRow] = await Promise.all([
+    getSignal(id), getLatestFeatures(id), getBars(id), getRecentTrades(id), getPriceChangeRow(id),
   ])
+  const change = describeChange(changeRow, (ms) =>
+    new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))
   // Server Component: runs once per request, so reading the time is safe.
   // eslint-disable-next-line react-hooks/purity
   const renderedAt = Date.now()
@@ -49,7 +52,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
 
       {/* Readout strip: flat, thin dividers. Tremor score as an instrument
           reading; z-score and imbalance as smaller readings beside it. */}
-      <section className="grid grid-cols-[2fr_1fr_1fr] divide-x border-y">
+      <section className="grid grid-cols-[2fr_1fr_1fr_1fr] divide-x border-y">
         <div className="py-4 pr-6">
           <Label>Tremor score</Label>
           <div className="flex items-baseline gap-4">
@@ -60,6 +63,14 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
           </div>
           <ScoreScale score={signal?.tremor_score ?? null} />
         </div>
+        {/* Ink, not orange: the arrow and sign carry the direction. Tooltip gives
+            the reference time or why there's no change. */}
+        <Reading label="1h change"
+                 value={change.kind === 'change'
+                   ? <>{change.arrow && <span className="mr-1 align-[0.1em] text-xs">{change.arrow}</span>}{change.value}</>
+                   : '—'}
+                 title={change.kind === 'change' ? change.label : change.reason}
+                 note={change.kind === 'change' ? `since ${new Date(change.refMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : change.reason} />
         <Reading label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'}
                  note="3 or more scores 100" />
         {/* Not part of the tremor score; null when the book is stale or one-sided */}
@@ -110,9 +121,9 @@ function Label({ children }: { children: React.ReactNode }) {
   return <div className="text-xs text-muted">{children}</div>
 }
 
-function Reading({ label, value, note }: { label: string; value: string; note?: string }) {
+function Reading({ label, value, note, title }: { label: string; value: React.ReactNode; note?: string; title?: string }) {
   return (
-    <div className="px-6 py-4">
+    <div className="px-6 py-4" title={title}>
       <Label>{label}</Label>
       <div className="font-mono text-xl leading-8 font-semibold tabular-nums">{value}</div>
       {note && <div className="text-xs text-muted">{note}</div>}
