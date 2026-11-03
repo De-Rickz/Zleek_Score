@@ -6,7 +6,7 @@ import { getBars, getLatestFeatures, getMarket, getRecentTrades, getSignal } fro
 import { fixed, timeAgo, usd } from '@/lib/format'
 import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
-import ScoreBadge from '@/app/components/ScoreBadge'
+import ScoreScale from '@/app/components/ScoreScale'
 import UpdatedAgo from '@/app/components/UpdatedAgo'
 
 export const dynamic = 'force-dynamic'
@@ -47,15 +47,25 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
         </p>
       </header>
 
-      <section className="grid grid-cols-3 gap-4">
-        <Stat label="Tremor score" value={<ScoreBadge score={signal?.tremor_score ?? null} large />}
-              sub={signal ? <span className="font-mono">{timeAgo(signal.scored_at_ms)}</span> : undefined} />
-        <Stat label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'} />
+      {/* Readout strip: flat, thin dividers. Tremor score as an instrument
+          reading; z-score and imbalance as smaller readings beside it. */}
+      <section className="grid grid-cols-[2fr_1fr_1fr] divide-x border-y">
+        <div className="py-4 pr-6">
+          <Label>Tremor score</Label>
+          <div className="flex items-baseline gap-4">
+            <span className="font-mono text-xl leading-8 font-semibold tabular-nums">
+              {signal?.tremor_score == null ? '—' : Math.round(signal.tremor_score)}
+            </span>
+            {signal && <span className="font-mono text-xs text-muted">scored {timeAgo(signal.scored_at_ms)}</span>}
+          </div>
+          <ScoreScale score={signal?.tremor_score ?? null} />
+        </div>
+        <Reading label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'}
+                 note="3 or more scores 100" />
         {/* Not part of the tremor score; null when the book is stale or one-sided */}
-        {features?.ob_imbalance != null
-          ? <Stat label="Order-book imbalance" value={fixed(features.ob_imbalance, 2)}
-                  sub="whole book, incl. orders far from the price" />
-          : <Stat label="Order-book imbalance" value="n/a" />}
+        <Reading label="Order-book imbalance"
+                 value={features?.ob_imbalance != null ? fixed(features.ob_imbalance, 2) : 'n/a'}
+                 note={features?.ob_imbalance != null ? 'whole book, incl. orders far from the price' : undefined} />
       </section>
 
       <section>
@@ -96,12 +106,16 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
 // show nothing rather than a placeholder word.
 const hasCategory = (c: string | null) => !!c && c.toLowerCase() !== 'uncategorized'
 
-function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
+function Label({ children }: { children: React.ReactNode }) {
+  return <div className="text-xs text-muted">{children}</div>
+}
+
+function Reading({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
-    <div className="rounded border p-4">
-      <div className="text-xs text-muted">{label}</div>
+    <div className="px-6 py-4">
+      <Label>{label}</Label>
       <div className="font-mono text-xl leading-8 font-semibold tabular-nums">{value}</div>
-      {sub && <div className="text-xs text-muted tabular-nums">{sub}</div>}
+      {note && <div className="text-xs text-muted">{note}</div>}
     </div>
   )
 }
