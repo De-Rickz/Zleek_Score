@@ -29,7 +29,7 @@ export default async function Home() {
       </div>
 
       {stale && (
-        <p className="mb-4 rounded bg-warn-bg px-4 py-2 text-sm text-warn-fg">
+        <p className="mb-4 border-l-2 border-accent py-2 pl-4 text-sm">
           Newest score is <span className="font-mono">{timeAgo(newest)}</span>. The worker may be down.
         </p>
       )}
@@ -41,7 +41,6 @@ export default async function Home() {
           <thead className="text-left text-muted">
             <tr>
               <th className="py-2">Market</th>
-              <th>Category</th>
               <th className="pl-4 text-right">Liquidity</th>
               <th className="pl-4 text-right">Tremor</th>
               <th className="pl-4 text-right">Updated</th>
@@ -55,7 +54,6 @@ export default async function Home() {
                     {m.title}
                   </Link>
                 </td>
-                <td>{m.category ?? '—'}</td>
                 <td className="pl-4 text-right font-mono tabular-nums">{usd(m.liquidity_usd)}</td>
                 <td className="pl-4 text-right"><ScoreBadge score={m.tremor_score} /></td>
                 <td className="pl-4 text-right font-mono text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>

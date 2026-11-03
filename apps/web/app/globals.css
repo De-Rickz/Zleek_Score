@@ -2,18 +2,17 @@
 
 /* Colour tokens. Every text/background pair is at least 4.5:1 (WCAG AA) in
    both modes, checked against Tailwind's own colour values:
-   muted 4.73 light / 7.63 dark, warning 8.17 / 12.03. */
+   muted 4.73 light / 7.63 dark; accent 5.23 / 6.85; ink 17.93 / 16.91. */
 :root {
   --background: #ffffff;
   --foreground: #171717;
   --muted: var(--color-neutral-500);       /* secondary text */
   --line: var(--color-neutral-200);        /* borders, table rules */
   --skeleton: var(--color-neutral-100);
-  --warn-bg: var(--color-amber-100);
-  --warn-fg: var(--color-amber-900);
+  --accent: var(--color-orange-700);      /* the one accent: signal marks; 5.23 */
   --chart-axis: var(--color-neutral-600);  /* 7.80 on white */
   --chart-grid: var(--color-neutral-100);
-  --chart-price: var(--color-blue-600);
+  --chart-price: var(--foreground);        /* ink */
   --chart-volume: var(--color-neutral-500); /* bars: 4.73, >= 3:1 for graphics */
 }
 
@@ -24,11 +23,10 @@
     --muted: var(--color-neutral-400);
     --line: var(--color-neutral-800);
     --skeleton: var(--color-neutral-900);
-    --warn-bg: var(--color-amber-950);
-    --warn-fg: var(--color-amber-200);
+    --accent: var(--color-orange-500);      /* 6.85 on #0a0a0a */
     --chart-axis: var(--color-neutral-400); /* 7.63 on #0a0a0a */
     --chart-grid: var(--color-neutral-900);
-    --chart-price: var(--color-blue-400);
+    --chart-price: var(--foreground);
     --chart-volume: var(--color-neutral-500); /* 4.18 on #0a0a0a */
   }
 }
@@ -39,8 +37,7 @@
   --color-muted: var(--muted);
   --color-line: var(--line);
   --color-skeleton: var(--skeleton);
-  --color-warn-bg: var(--warn-bg);
-  --color-warn-fg: var(--warn-fg);
+  --color-accent: var(--accent);
   --font-sans: var(--font-plex-sans);
   --font-mono: var(--font-plex-mono);
 }

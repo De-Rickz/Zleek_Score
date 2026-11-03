@@ -42,7 +42,8 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       <header>
         <h1 className="text-xl font-semibold">{market.title}</h1>
         <p className="text-sm text-muted">
-          {market.category ?? 'Uncategorised'} · <span className="font-mono">{usd(market.liquidity_usd)}</span> liquidity
+          {hasCategory(market.category) && <>{market.category} · </>}
+          <span className="font-mono">{usd(market.liquidity_usd)}</span> liquidity
         </p>
       </header>
 
@@ -67,6 +68,14 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       <section>
         <h2 className="mb-2 text-sm font-semibold">Recent trades</h2>
         <table className="w-full text-sm">
+          <thead className="text-left text-muted">
+            <tr>
+              <th className="py-1">Time</th>
+              <th>Side</th>
+              <th className="text-right">Price (YES)</th>
+              <th className="text-right">Size (USD)</th>
+            </tr>
+          </thead>
           <tbody>
             {trades.map((t, i) => (
               <tr key={i} className="border-t">
@@ -82,6 +91,10 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
     </main>
   )
 }
+
+// Gamma sends "Uncategorized" (or nothing) for markets without a category;
+// show nothing rather than a placeholder word.
+const hasCategory = (c: string | null) => !!c && c.toLowerCase() !== 'uncategorized'
 
 function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
