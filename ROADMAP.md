@@ -14,6 +14,7 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 4. Coverage (Option B), in this order, measuring after each step:
    1. Add the trades(ts) index.
    2. Rank the backfill by recent volume: top 200 by 24h volume among open markets Gamma refreshed in the last 2 h, instead of by liquidity with no freshness check. On 2026-11-03 production, all 44 uncovered markets in the top 100 were crowded out of the liquidity-ranked backfill, and none of the 16 markets that traded in the last hour came from it.
+      Then check whether the dashboard's live count rises above 20 (~/Desktop/dashboard-classes.sql: on 2026-11-03 production it was 20 of 248 scored markets, exactly the websocket cap). If it doesn't, the cap raise in step 3 is the main lever for coverage.
    3. Raise the websocket cap from 20 to 100, then 200 if load allows (it would cover 14, then 35, of those 44).
    4. Books for every scored market, then imbalance can rejoin the tremor score.
 
