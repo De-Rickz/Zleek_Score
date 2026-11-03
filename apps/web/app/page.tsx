@@ -24,18 +24,18 @@ export default async function Home() {
     <main className="mx-auto max-w-5xl p-6">
       <AutoRefresh />
       <div className="mb-4 flex items-baseline justify-between gap-4">
-        <h1 className="text-2xl font-semibold">Markets by Tremor Score</h1>
+        <h1 className="text-xl font-semibold">Markets by Tremor Score</h1>
         <UpdatedAgo key={renderedAt} />
       </div>
 
       {stale && (
-        <p className="mb-4 rounded bg-warn-bg p-3 text-sm text-warn-fg">
+        <p className="mb-4 rounded bg-warn-bg px-4 py-2 text-sm text-warn-fg">
           Newest score is {timeAgo(newest)}. The worker may be down.
         </p>
       )}
 
       {markets.length === 0 ? (
-        <p className="text-muted">No scored markets yet.</p>
+        <p className="text-sm text-muted">No scored markets yet.</p>
       ) : (
         <table className="w-full text-sm">
           <thead className="text-left text-muted">

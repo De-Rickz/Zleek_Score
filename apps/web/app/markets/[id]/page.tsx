@@ -40,7 +40,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
         <UpdatedAgo key={renderedAt} />
       </div>
       <header>
-        <h1 className="text-2xl font-semibold">{market.title}</h1>
+        <h1 className="text-xl font-semibold">{market.title}</h1>
         <p className="text-sm text-muted">
           {market.category ?? 'Uncategorised'} · {usd(market.liquidity_usd)} liquidity
         </p>
@@ -58,14 +58,14 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       </section>
 
       <section>
-        <h2 className="mb-2 font-medium">1-minute price & volume</h2>
+        <h2 className="mb-2 text-sm font-semibold">1-minute price & volume</h2>
         {bars.length === 0
-          ? <p className="text-muted">No 1-minute bars yet for this market.</p>
+          ? <p className="text-sm text-muted">No 1-minute bars yet for this market.</p>
           : <PriceChart bars={bars} />}
       </section>
 
       <section>
-        <h2 className="mb-2 font-medium">Recent trades</h2>
+        <h2 className="mb-2 text-sm font-semibold">Recent trades</h2>
         <table className="w-full text-sm">
           <tbody>
             {trades.map((t, i) => (
@@ -87,7 +87,7 @@ function Stat({ label, value, sub }: { label: string; value: React.ReactNode; su
   return (
     <div className="rounded border p-4">
       <div className="text-xs text-muted">{label}</div>
-      <div className="text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="text-xl leading-8 font-semibold tabular-nums">{value}</div>
       {sub && <div className="text-xs text-muted">{sub}</div>}
     </div>
   )
