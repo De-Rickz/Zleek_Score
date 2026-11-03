@@ -3,11 +3,12 @@
 import { useEffect, useRef } from 'react'
 import {
   Chart, BarController, BarElement, LineController, LineElement, PointElement,
-  LinearScale, CategoryScale, Tooltip, Legend,
+  LinearScale, CategoryScale, Tooltip,
 } from 'chart.js'
 
+// No Legend: the axis titles name both series. Tooltip stays (it carries data).
 Chart.register(BarController, BarElement, LineController, LineElement, PointElement,
-  LinearScale, CategoryScale, Tooltip, Legend)
+  LinearScale, CategoryScale, Tooltip)
 
 type Point = { bucket_ms: number; close: number; volume_usd: number }
 
@@ -41,11 +42,14 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
         responsive: true,
         maintainAspectRatio: false,
         animation: false, // chart is rebuilt on each poll; animation would flicker
-        color: axis, // legend text
+        // Minimal ink: no vertical gridlines, faint horizontal ones for price
+        // only, about 8 time labels, axis titles instead of a legend.
         scales: {
-          x: { ticks: { color: axis }, grid: { color: grid } },
-          y: { position: 'left', ticks: { color: axis }, grid: { color: grid } },
-          y1: { position: 'right', beginAtZero: true, ticks: { color: axis }, grid: { drawOnChartArea: false } },
+          x: { grid: { display: false }, ticks: { color: axis, maxTicksLimit: 8, maxRotation: 0 } },
+          y: { position: 'left', grid: { color: grid }, border: { display: false },
+               ticks: { color: axis }, title: { display: true, text: 'Price (YES)', color: axis } },
+          y1: { position: 'right', beginAtZero: true, grid: { display: false }, border: { display: false },
+                ticks: { color: axis }, title: { display: true, text: 'Volume (USD)', color: axis } },
         },
       },
     })
