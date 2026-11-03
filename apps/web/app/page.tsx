@@ -4,6 +4,7 @@ import { getMarketsByTremor } from '@/lib/queries'
 import { timeAgo, usd } from '@/lib/format'
 import AutoRefresh from './components/AutoRefresh'
 import ScoreBadge from './components/ScoreBadge'
+import UpdatedAgo from './components/UpdatedAgo'
 
 // Without this, `next build` prerenders the page and freezes today's DB snapshot.
 export const dynamic = 'force-dynamic'
@@ -16,12 +17,16 @@ export default async function Home() {
   // Async Server Component: runs once per request, not memoized by the compiler,
   // so reading the current time here is safe despite the purity rule.
   // eslint-disable-next-line react-hooks/purity
-  const stale = markets.length > 0 && Date.now() - newest > STALE_AFTER_MS
+  const renderedAt = Date.now()
+  const stale = markets.length > 0 && renderedAt - newest > STALE_AFTER_MS
 
   return (
     <main className="mx-auto max-w-5xl p-6">
       <AutoRefresh />
-      <h1 className="mb-4 text-2xl font-semibold">Markets by Tremor Score</h1>
+      <div className="mb-4 flex items-baseline justify-between gap-4">
+        <h1 className="text-2xl font-semibold">Markets by Tremor Score</h1>
+        <UpdatedAgo key={renderedAt} />
+      </div>
 
       {stale && (
         <p className="mb-4 rounded bg-warn-bg p-3 text-sm text-warn-fg">

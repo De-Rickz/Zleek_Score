@@ -7,6 +7,7 @@ import { fixed, timeAgo, usd } from '@/lib/format'
 import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
 import ScoreBadge from '@/app/components/ScoreBadge'
+import UpdatedAgo from '@/app/components/UpdatedAgo'
 
 export const dynamic = 'force-dynamic'
 
@@ -27,11 +28,17 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   const [signal, features, bars, trades] = await Promise.all([
     getSignal(id), getLatestFeatures(id), getBars(id), getRecentTrades(id),
   ])
+  // Server Component: runs once per request, so reading the time is safe.
+  // eslint-disable-next-line react-hooks/purity
+  const renderedAt = Date.now()
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-6">
       <AutoRefresh />
-      <Link href="/" className="text-sm text-muted hover:underline">← Markets</Link>
+      <div className="flex items-baseline justify-between gap-4">
+        <Link href="/" className="text-sm text-muted hover:underline">← Markets</Link>
+        <UpdatedAgo key={renderedAt} />
+      </div>
       <header>
         <h1 className="text-2xl font-semibold">{market.title}</h1>
         <p className="text-sm text-muted">
