@@ -42,9 +42,9 @@ export default async function Home() {
             <tr>
               <th className="py-2">Market</th>
               <th>Category</th>
-              <th className="text-right">Liquidity</th>
-              <th className="text-right">Tremor</th>
-              <th className="text-right">Updated</th>
+              <th className="pl-4 text-right">Liquidity</th>
+              <th className="pl-4 text-right">Tremor</th>
+              <th className="pl-4 text-right">Updated</th>
             </tr>
           </thead>
           <tbody>
@@ -56,9 +56,9 @@ export default async function Home() {
                   </Link>
                 </td>
                 <td>{m.category ?? '—'}</td>
-                <td className="text-right tabular-nums">{usd(m.liquidity_usd)}</td>
-                <td className="text-right"><ScoreBadge score={m.tremor_score} /></td>
-                <td className="text-right text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
+                <td className="pl-4 text-right tabular-nums">{usd(m.liquidity_usd)}</td>
+                <td className="pl-4 text-right"><ScoreBadge score={m.tremor_score} /></td>
+                <td className="pl-4 text-right text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
               </tr>
             ))}
           </tbody>
