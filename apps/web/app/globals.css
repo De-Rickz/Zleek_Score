@@ -41,8 +41,8 @@
   --color-skeleton: var(--skeleton);
   --color-warn-bg: var(--warn-bg);
   --color-warn-fg: var(--warn-fg);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
 }
 
 /* Tailwind v4 borders default to currentColor (full text colour); use the
@@ -54,7 +54,7 @@
 }
 
 /* No font-family here: Tailwind's base styles already apply --font-sans
-   (Geist, loaded in app/layout.tsx). */
+   (IBM Plex Sans, loaded in app/layout.tsx). */
 body {
   background: var(--background);
   color: var(--foreground);

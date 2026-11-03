@@ -14,5 +14,5 @@ export default function UpdatedAgo() {
   }, [])
   const s = Math.max(0, Math.round((now - since) / 1000))
   const ago = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
-  return <span className="text-xs text-muted tabular-nums">Updated {ago} ago</span>
+  return <span className="text-xs text-muted">Updated <span className="font-mono tabular-nums">{ago}</span> ago</span>
 }

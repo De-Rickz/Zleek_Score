@@ -42,13 +42,13 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       <header>
         <h1 className="text-xl font-semibold">{market.title}</h1>
         <p className="text-sm text-muted">
-          {market.category ?? 'Uncategorised'} · {usd(market.liquidity_usd)} liquidity
+          {market.category ?? 'Uncategorised'} · <span className="font-mono">{usd(market.liquidity_usd)}</span> liquidity
         </p>
       </header>
 
       <section className="grid grid-cols-3 gap-4">
         <Stat label="Tremor score" value={<ScoreBadge score={signal?.tremor_score ?? null} large />}
-              sub={signal ? timeAgo(signal.scored_at_ms) : undefined} />
+              sub={signal ? <span className="font-mono">{timeAgo(signal.scored_at_ms)}</span> : undefined} />
         <Stat label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'} />
         {/* Not part of the tremor score; null when the book is stale or one-sided */}
         {features?.ob_imbalance != null
@@ -70,10 +70,10 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
           <tbody>
             {trades.map((t, i) => (
               <tr key={i} className="border-t">
-                <td className="py-1 text-muted tabular-nums">{timeAgo(t.ts_ms)}</td>
+                <td className="py-1 font-mono text-muted tabular-nums">{timeAgo(t.ts_ms)}</td>
                 <td>{t.side}</td>
-                <td className="text-right tabular-nums">{t.price.toFixed(3)}</td>
-                <td className="text-right tabular-nums">{usd(t.size_usd)}</td>
+                <td className="text-right font-mono tabular-nums">{t.price.toFixed(3)}</td>
+                <td className="text-right font-mono tabular-nums">{usd(t.size_usd)}</td>
               </tr>
             ))}
           </tbody>
@@ -83,11 +83,11 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   )
 }
 
-function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
+function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
     <div className="rounded border p-4">
       <div className="text-xs text-muted">{label}</div>
-      <div className="text-xl leading-8 font-semibold tabular-nums">{value}</div>
+      <div className="font-mono text-xl leading-8 font-semibold tabular-nums">{value}</div>
       {sub && <div className="text-xs text-muted tabular-nums">{sub}</div>}
     </div>
   )

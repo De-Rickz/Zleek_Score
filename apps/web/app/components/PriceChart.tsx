@@ -23,6 +23,7 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
   useEffect(() => {
     if (!ref.current) return
     const axis = token('--chart-axis'), grid = token('--chart-grid')
+    const mono = { family: token('--font-plex-mono') }  // numbers in IBM Plex Mono
     const chart = new Chart(ref.current, {
       type: 'bar',
       data: {
@@ -45,11 +46,11 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
         // Minimal ink: no vertical gridlines, faint horizontal ones for price
         // only, about 8 time labels, axis titles instead of a legend.
         scales: {
-          x: { grid: { display: false }, ticks: { color: axis, maxTicksLimit: 8, maxRotation: 0 } },
+          x: { grid: { display: false }, ticks: { color: axis, font: mono, maxTicksLimit: 8, maxRotation: 0 } },
           y: { position: 'left', grid: { color: grid }, border: { display: false },
-               ticks: { color: axis }, title: { display: true, text: 'Price (YES)', color: axis } },
+               ticks: { color: axis, font: mono }, title: { display: true, text: 'Price (YES)', color: axis } },
           y1: { position: 'right', beginAtZero: true, grid: { display: false }, border: { display: false },
-                ticks: { color: axis }, title: { display: true, text: 'Volume (USD)', color: axis } },
+                ticks: { color: axis, font: mono }, title: { display: true, text: 'Volume (USD)', color: axis } },
         },
       },
     })

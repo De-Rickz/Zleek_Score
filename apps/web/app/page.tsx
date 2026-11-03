@@ -30,7 +30,7 @@ export default async function Home() {
 
       {stale && (
         <p className="mb-4 rounded bg-warn-bg px-4 py-2 text-sm text-warn-fg">
-          Newest score is {timeAgo(newest)}. The worker may be down.
+          Newest score is <span className="font-mono">{timeAgo(newest)}</span>. The worker may be down.
         </p>
       )}
 
@@ -56,9 +56,9 @@ export default async function Home() {
                   </Link>
                 </td>
                 <td>{m.category ?? '—'}</td>
-                <td className="pl-4 text-right tabular-nums">{usd(m.liquidity_usd)}</td>
+                <td className="pl-4 text-right font-mono tabular-nums">{usd(m.liquidity_usd)}</td>
                 <td className="pl-4 text-right"><ScoreBadge score={m.tremor_score} /></td>
-                <td className="pl-4 text-right text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
+                <td className="pl-4 text-right font-mono text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
               </tr>
             ))}
           </tbody>
