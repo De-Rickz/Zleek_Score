@@ -69,3 +69,32 @@ export async function getRecentTrades(marketId: string, limit = 50) {
     FROM trades WHERE market_id = ${marketId}
     ORDER BY ts DESC LIMIT ${limit}`)
 }
+
+export type TracePoint = { t: number; close: number }
+export const TRACE_WINDOW_MS = 4 * 60 * 60_000
+
+// Dashboard traces: each market's 1-minute closes over the last 4 hours, plus
+// its last close in the 20 hours before that (so a market with no trades in
+// the window still draws a flat line at its level). Two indexed reads for the
+// whole page (~6 ms for the top 100 on the 2026-11-03 Mac database).
+export async function getTraces(marketIds: string[]) {
+  const traces = new Map<string, { prior: number | null; points: TracePoint[] }>()
+  if (marketIds.length === 0) return traces
+  const [points, prior] = await Promise.all([
+    sql<{ market_id: string; t: number; close: number }[]>`
+      SELECT market_id, (extract(epoch FROM bucket) * 1000)::float8 AS t, close::float8 AS close
+      FROM bars_1m
+      WHERE market_id IN ${sql(marketIds)} AND bucket > now() - interval '4 hours'
+      ORDER BY market_id, bucket`,
+    sql<{ market_id: string; close: number }[]>`
+      SELECT DISTINCT ON (market_id) market_id, close::float8 AS close
+      FROM bars_1m
+      WHERE market_id IN ${sql(marketIds)}
+        AND bucket <= now() - interval '4 hours' AND bucket > now() - interval '24 hours'
+      ORDER BY market_id, bucket DESC`,
+  ])
+  for (const id of marketIds) traces.set(id, { prior: null, points: [] })
+  for (const r of prior) traces.get(r.market_id)!.prior = r.close
+  for (const r of points) traces.get(r.market_id)!.points.push({ t: r.t, close: r.close })
+  return traces
+}

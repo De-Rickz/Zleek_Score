@@ -1,9 +1,10 @@
 // app/page.tsx
 import Link from 'next/link'
-import { getMarketsByTremor } from '@/lib/queries'
+import { getMarketsByTremor, getTraces, TRACE_WINDOW_MS } from '@/lib/queries'
 import { timeAgo, usd } from '@/lib/format'
 import AutoRefresh from './components/AutoRefresh'
 import ScoreBadge from './components/ScoreBadge'
+import Trace from './components/Trace'
 import UpdatedAgo from './components/UpdatedAgo'
 
 // Without this, `next build` prerenders the page and freezes today's DB snapshot.
@@ -13,6 +14,7 @@ const STALE_AFTER_MS = 5 * 60_000
 
 export default async function Home() {
   const markets = await getMarketsByTremor()
+  const traces = await getTraces(markets.map((m) => m.id))
   const newest = Math.max(0, ...markets.map((m) => m.scored_at_ms))
   // Async Server Component: runs once per request, not memoized by the compiler,
   // so reading the current time here is safe despite the purity rule.
@@ -42,6 +44,7 @@ export default async function Home() {
             <tr>
               <th className="py-2">Market</th>
               <th className="pl-4 text-right">Liquidity</th>
+              <th className="pl-4">Last 4h</th>
               <th className="pl-4 text-right">Tremor</th>
               <th className="pl-4 text-right">Updated</th>
             </tr>
@@ -55,6 +58,9 @@ export default async function Home() {
                   </Link>
                 </td>
                 <td className="pl-4 text-right font-mono tabular-nums">{usd(m.liquidity_usd)}</td>
+                <td className="pl-4 align-middle">
+                  <Trace {...traces.get(m.id)!} start={renderedAt - TRACE_WINDOW_MS} end={renderedAt} />
+                </td>
                 <td className="pl-4 text-right"><ScoreBadge score={m.tremor_score} /></td>
                 <td className="pl-4 text-right font-mono text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
               </tr>
