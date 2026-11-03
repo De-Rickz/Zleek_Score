@@ -6,6 +6,7 @@ import { getBars, getLatestFeatures, getMarket, getRecentTrades, getSignal } fro
 import { fixed, timeAgo, usd } from '@/lib/format'
 import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
+import ScoreBadge from '@/app/components/ScoreBadge'
 
 export const dynamic = 'force-dynamic'
 
@@ -39,7 +40,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       </header>
 
       <section className="grid grid-cols-3 gap-4">
-        <Stat label="Tremor score" value={signal ? fixed(signal.tremor_score, 0) : '—'}
+        <Stat label="Tremor score" value={<ScoreBadge score={signal?.tremor_score ?? null} large />}
               sub={signal ? timeAgo(signal.scored_at_ms) : undefined} />
         <Stat label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'} />
         {/* Not part of the tremor score; null when the book is stale or one-sided */}
@@ -75,7 +76,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   )
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
     <div className="rounded border p-4">
       <div className="text-xs text-muted">{label}</div>

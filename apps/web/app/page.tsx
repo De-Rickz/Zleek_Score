@@ -1,8 +1,9 @@
 // app/page.tsx
 import Link from 'next/link'
 import { getMarketsByTremor } from '@/lib/queries'
-import { fixed, timeAgo, usd } from '@/lib/format'
+import { timeAgo, usd } from '@/lib/format'
 import AutoRefresh from './components/AutoRefresh'
+import ScoreBadge from './components/ScoreBadge'
 
 // Without this, `next build` prerenders the page and freezes today's DB snapshot.
 export const dynamic = 'force-dynamic'
@@ -51,7 +52,7 @@ export default async function Home() {
                 </td>
                 <td>{m.category ?? '—'}</td>
                 <td className="text-right tabular-nums">{usd(m.liquidity_usd)}</td>
-                <td className="text-right font-medium tabular-nums">{fixed(m.tremor_score, 0)}</td>
+                <td className="text-right"><ScoreBadge score={m.tremor_score} /></td>
                 <td className="text-right text-muted">{timeAgo(m.scored_at_ms)}</td>
               </tr>
             ))}
