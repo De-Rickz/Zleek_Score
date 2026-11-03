@@ -8,6 +8,16 @@ export type Market = {
   liquidity_usd: number | null
 }
 export type MarketRow = Market & { tremor_score: number | null; scored_at_ms: number }
+// Dashboard row: a scored market plus what the ended and freshness rules need
+// (lib/freshness.ts).
+export type DashboardRow = MarketRow & {
+  gamma_closed: boolean
+  accepting_orders: boolean
+  end_ms: number | null
+  last_trade_ms: number | null
+  last_bar_ms: number | null
+  bars_in_window: number
+}
 export type Bar = {
   bucket_ms: number
   open: number
