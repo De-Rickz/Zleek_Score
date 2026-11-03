@@ -15,6 +15,8 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 5. Packaging: README with architecture diagram, demo video.
 6. Ship: pick a date once the VPS has run stable through phase 4.
 
+Frontend (v1 scope pages) is a parallel track: may proceed alongside any phase, stays inside v1 scope, and features depending on phase 4 data (imbalance in the score) wait for phase 4.
+
 ## Rules for choosing work
 - Finish the current phase before starting the next.
 - Items in infra/TODO.md are only worked on when they belong to the current phase, or when asked.
