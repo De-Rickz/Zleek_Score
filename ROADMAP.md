@@ -10,8 +10,9 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 ## Phases (in order)
 1. Data correctness: token labels, YES-equivalent prices, repair + rebuild history; scoring calibration. (done 2026-10-30: deployed; acceptance A-E pass, see apps/worker/scripts/acceptance_price_orientation.sql)
 2. Data loss: backfill from newest stored trade on startup; dead-websocket detection; Redis flush only deletes after commit. (done 2026-10-31: deployed; acceptance A-E pass. Related, still open in infra/TODO.md: events dropped while Redis is down.)
-3. Hosting: move worker, Postgres, Redis and web app together to a VPS (systemd, Caddy). Fresh database.
+3. Hosting: move worker, Postgres, Redis and web app together to a VPS (systemd, Caddy). Fresh database. (done 2026-11-03: cutover to the Oracle server; Mac data kept as rollback until 2026-11-17; see docs/parallel-run.md §5)
 4. Coverage (Option B), in this order, measuring after each step:
+   Soak first: phase 4 starts no earlier than 2026-11-06, and only if the heartbeat has stayed green and nothing unexplained has turned up. Frontend deploys are allowed during the soak; worker changes aren't.
    1. Add the trades(ts) index.
    2. Rank the backfill by recent volume: top 200 by 24h volume among open markets Gamma refreshed in the last 2 h, instead of by liquidity with no freshness check. On 2026-11-03 production, all 44 uncovered markets in the top 100 were crowded out of the liquidity-ranked backfill, and none of the 16 markets that traded in the last hour came from it.
       Then check whether the dashboard's live count rises above 20 (apps/worker/scripts/dashboard-classes.sql: on 2026-11-03 production it was 20 of 248 scored markets, exactly the websocket cap). If it doesn't, the cap raise in step 4 is the main lever for coverage.
