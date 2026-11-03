@@ -10,19 +10,28 @@ funnel_export_markets.sql, made with the SAME -v t0/t1 on both machines:
 The question it answers: did production miss trades the Mac caught?
 
 Trades are matched by tx_hash (unique in trades). A trade only the Mac has is
-classified by its market:
-  - MISSED: production has other trades in that market in the window, so it
-    was tracking the market and still lacks this trade. This is the signal of
-    silently dropped data.
+classified by its market and its time:
+  - MISSED: production has another trade in that market within
+    --missed-window-min minutes (default 10) of this one, so it was following
+    the market at that moment and still lacks this trade. This is the signal
+    of silently dropped data.
+  - NOT FOLLOWED AT THE TIME: production has trades in that market elsewhere
+    in the window, but none that close. Each worker's websocket follows the
+    top 20 markets by 24h volume and re-ranks every 5 min, so the two can
+    cover a quiet market at different times (2026-11-03: market 630806,
+    production's trades 10:06-10:28, the Mac's one trade at 11:00).
   - NOT TRACKED: production has no trade in that market at all. Expected to
     some degree: each worker picks its websocket markets (top 20 by 24h
     volume) and backfill markets (top 200 by liquidity) from its own markets
     table, so the two sets can differ, mostly in the tail.
-Exit code 1 if MISSED exceeds --max-missed-pct of the Mac's trades in markets
-production tracked (default 0.1%: data correctness comes first, and any
-missed trade in a tracked market should be explained), else 0.
+Exit code 1 if MISSED exceeds --max-missed-pct of the Mac's trades that
+production was following at the time (default 0.1%: data correctness comes
+first, and any missed trade in a followed market should be explained), else 0.
+With few such trades one miss moves the percentage a lot; prefer a long
+window (e.g. the whole 24 h).
 """
 import argparse
+import bisect
 import csv
 import sys
 from collections import Counter
@@ -45,6 +54,12 @@ def load_markets(path):
         return {r["market_id"]: r for r in csv.DictReader(f)}
 
 
+def has_trade_near(times, ts, window_sec):
+    """True if the sorted list `times` has a value within window_sec of ts."""
+    i = bisect.bisect_left(times, ts - window_sec)
+    return i < len(times) and times[i] <= ts + window_sec
+
+
 def pct(a, b):
     return f"{100.0 * a / b:.2f}%" if b else "n/a"
 
@@ -54,6 +69,9 @@ def main():
     ap.add_argument("mac_trades"); ap.add_argument("prod_trades")
     ap.add_argument("mac_markets"); ap.add_argument("prod_markets")
     ap.add_argument("--max-missed-pct", type=float, default=0.1)
+    ap.add_argument("--missed-window-min", type=float, default=10.0,
+                    help="a Mac-only trade counts as MISSED only if production has a trade in "
+                         "the same market within this many minutes of it (default 10)")
     ap.add_argument("--top", type=int, default=10)
     a = ap.parse_args()
 
@@ -66,10 +84,25 @@ def main():
     both = mac.keys() & prod.keys()
     mac_only = [mac[h] for h in mac.keys() - prod.keys()]
     prod_only = [prod[h] for h in prod.keys() - mac.keys()]
-    missed = [r for r in mac_only if r["market_id"] in prod_trade_markets]
+    window_sec = a.missed_window_min * 60
+    prod_times = {}
+    for r in prod.values():
+        prod_times.setdefault(r["market_id"], []).append(int(r["ts_unix"]))
+    for times in prod_times.values():
+        times.sort()
+
+    def followed(r):
+        # production had a trade in this market within the window of r
+        times = prod_times.get(r["market_id"])
+        return times is not None and has_trade_near(times, int(r["ts_unix"]), window_sec)
+
+    missed = [r for r in mac_only if followed(r)]
+    not_followed = [r for r in mac_only if r["market_id"] in prod_trade_markets and not followed(r)]
     not_tracked = [r for r in mac_only if r["market_id"] not in prod_trade_markets]
     prod_extra_tracked = [r for r in prod_only if r["market_id"] in mac_trade_markets]
-    mac_in_prod_markets = sum(1 for r in mac.values() if r["market_id"] in prod_trade_markets)
+    # denominator: the Mac's trades production was following at the time (a
+    # matched trade counts: production has that very trade)
+    mac_followed = sum(1 for h, r in mac.items() if h in prod or followed(r))
 
     print("== Trades (matched by tx_hash)")
     print(f"   Mac:  {len(mac):>8} trades in {len(mac_trade_markets)} markets  (+{mac_nohash} without tx_hash, not matchable)")
@@ -77,8 +110,11 @@ def main():
     print(f"   in both: {len(both)}   Mac only: {len(mac_only)}   Prod only: {len(prod_only)}")
     print(f"   Mac-only, market NOT TRACKED by prod: {len(not_tracked)} trades in "
           f"{len({r['market_id'] for r in not_tracked})} markets  (market selection difference)")
-    print(f"   Mac-only, MISSED in markets prod tracked: {len(missed)} trades = "
-          f"{pct(len(missed), mac_in_prod_markets)} of the Mac's {mac_in_prod_markets} trades in those markets")
+    print(f"   Mac-only, prod NOT FOLLOWING the market at the time (no prod trade within "
+          f"{a.missed_window_min:g} min): {len(not_followed)} trades in "
+          f"{len({r['market_id'] for r in not_followed})} markets  (selection timing difference)")
+    print(f"   Mac-only, MISSED while prod was following the market: {len(missed)} trades = "
+          f"{pct(len(missed), mac_followed)} of the Mac's {mac_followed} trades prod was following")
     print(f"   Prod-only in markets the Mac tracked: {len(prod_extra_tracked)} (the Mac missed these)")
 
     if missed:
@@ -109,9 +145,12 @@ def main():
     print(f"   markets both traded where prod has FEWER bars than the Mac: {len(worse)}"
           + (f"; largest: {worse[:a.top]}" if worse else ""))
 
-    limit_ok = mac_in_prod_markets == 0 or 100.0 * len(missed) / mac_in_prod_markets <= a.max_missed_pct
+    limit_ok = mac_followed == 0 or 100.0 * len(missed) / mac_followed <= a.max_missed_pct
     print("\n== Verdict:", "PASS" if limit_ok else "FLAG",
-          f"(MISSED {pct(len(missed), mac_in_prod_markets)} vs limit {a.max_missed_pct}%)")
+          f"(MISSED {pct(len(missed), mac_followed)} vs limit {a.max_missed_pct}%)")
+    if mac_followed and 100.0 / mac_followed > a.max_missed_pct:
+        print(f"   note: one missed trade is {pct(1, mac_followed)} of {mac_followed}; "
+              f"the sample is too small for a {a.max_missed_pct}% limit (use a longer window)")
     return 0 if limit_ok else 1
 
 

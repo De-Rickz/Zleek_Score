@@ -100,11 +100,18 @@ python3 apps/worker/scripts/compare_funnels.py mac_trades.csv prod_trades.csv ma
 
 Reading the result:
 
-- **MISSED** = trades the Mac has, in markets production *was* tracking in that
-  window, that production lacks. This is the "silently dropping data" signal.
-  Target: 0. The script prints the markets and UTC hours they fall in:
+- **MISSED** = trades the Mac has that production lacks although it was
+  following that market at the time: production has another trade in the
+  same market within 10 minutes (`--missed-window-min`). This is the
+  "silently dropping data" signal. Target: 0. The script prints the markets and UTC hours they fall in:
   clustered in one hour points at a production outage (check
   `$PROD logs worker --since ...`); spread out points at a systematic gap.
+- **NOT FOLLOWING the market at the time** = Mac-only trades in a market
+  production traded elsewhere in the window, but not within 10 minutes. Both
+  websockets re-rank their top 20 every 5 min, so a quiet market can be
+  covered by each worker at different times (2026-11-03: market 630806,
+  production 10:06-10:28, the Mac's one trade at 11:00). Not data loss; a
+  large number in busy markets would be worth a look.
 - **NOT TRACKED** = Mac-only trades in markets production had no trades for
   at all. Some is expected: each worker ranks markets from its own `markets`
   table (websocket: top 20 by 24h volume; backfill: top 200 by liquidity), and
@@ -113,12 +120,15 @@ Reading the result:
   sleeping or restarting shows up here).
 - Per-market section: markets where production has bars/features/scores and
   the Mac doesn't, or the reverse, and markets where production has fewer bars.
-- Verdict: PASS when MISSED is at most 0.1% of the Mac's trades in markets
-  production tracked (`--max-missed-pct`, default 0.1); exit code 1 otherwise.
+- Verdict: PASS when MISSED is at most 0.1% of the Mac's trades production was
+  following at the time (`--max-missed-pct`, default 0.1); exit code 1
+  otherwise. Under 1,000 such trades a single miss exceeds 0.1%, and the
+  script says so: use a long window (the whole 24 h), not a 2-hour one.
 
 Tested on 2026-11-02 against the Mac database, read-only: identical exports →
 0 missed, PASS; a copy with 30 trades and one whole market deleted → exactly
-30 MISSED and that market as NOT TRACKED.
+30 MISSED and that market as NOT TRACKED. Classification tests:
+`apps/worker/tests/test_compare_funnels.py`.
 
 ## 3. Heartbeat on the server (cron, with external alerting)
 
