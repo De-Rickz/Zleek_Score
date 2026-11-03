@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react'
 import {
   Chart, BarController, BarElement, LineController, LineElement, PointElement,
-  LinearScale, Tooltip,
+  LinearScale, Tooltip, type Plugin,
 } from 'chart.js'
 
 // No Legend: the axis titles name both series. Tooltip stays (it carries data).
@@ -20,6 +20,24 @@ const STEPS_MIN = [1, 2, 5, 10, 15, 30, 60, 120, 180, 240, 360, 720, 1440]
 // the chart is rebuilt on every poll, so a theme switch is picked up within 10 s.
 const token = (name: string) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+
+// Pen head: an accent-coloured dot where the price line meets "now", like the
+// pen of a chart recorder. Static (no motion).
+const penHead = (color: string): Plugin<'bar'> => ({
+  id: 'penHead',
+  afterDatasetsDraw(chart) {
+    const points = chart.getDatasetMeta(0).data   // the price line, in pixels
+    const last = points[points.length - 1]
+    if (!last) return
+    const { ctx } = chart
+    ctx.save()
+    ctx.fillStyle = color
+    ctx.beginPath()
+    ctx.arc(last.x, last.y, 4, 0, 2 * Math.PI)
+    ctx.fill()
+    ctx.restore()
+  },
+})
 
 const hhmm = (ms: number) =>
   new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
@@ -46,13 +64,17 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
         datasets: [
           // stepped 'before': the price holds at the last close until the next
           // trade, instead of a straight line implying trades in between.
-          { type: 'line', label: 'Close', data: bars.map((b) => ({ x: b.bucket_ms, y: b.close })),
+          // ...and through to now: the pen head sits at the current price.
+          { type: 'line', label: 'Close',
+            data: [...bars.map((b) => ({ x: b.bucket_ms, y: b.close })),
+                   ...(bars.length ? [{ x: end, y: bars[bars.length - 1].close }] : [])],
             yAxisID: 'y', pointRadius: 0, borderWidth: 2, stepped: 'before',
             borderColor: token('--chart-price'), backgroundColor: token('--chart-price') },
           { type: 'bar', label: 'Volume (USD)', data: bars.map((b) => ({ x: b.bucket_ms, y: b.volume_usd })),
             yAxisID: 'y1', backgroundColor: token('--chart-volume') },
         ],
       },
+      plugins: [penHead(token('--accent'))],
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -60,10 +82,10 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
         plugins: {
           tooltip: { callbacks: { title: (items) => (items.length ? hhmm(items[0].parsed.x ?? 0) : '') } },
         },
-        // Minimal ink: no vertical gridlines, faint horizontal ones for price
-        // only, labels at round clock times, axis titles instead of a legend.
+        // Recorder paper, minimal ink: faint rules at the round clock times and
+        // at price levels only, axis titles instead of a legend.
         scales: {
-          x: { type: 'linear', min: start, max: end, offset: false, grid: { display: false },
+          x: { type: 'linear', min: start, max: end, offset: false, grid: { color: grid }, border: { display: false },
                // Labels at round clock times (multiples of the step), not counted
                // from the first bar.
                afterBuildTicks: (scale) => {

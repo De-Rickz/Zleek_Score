@@ -1,19 +1,21 @@
 @import "tailwindcss";
 
-/* Colour tokens. Every text/background pair is at least 4.5:1 (WCAG AA) in
-   both modes, checked against Tailwind's own colour values:
-   muted 4.73 light / 7.63 dark; accent 5.23 / 6.85; ink 17.93 / 16.91. */
+/* Colour tokens. Light mode is ink on warm paper (#f7f4ec) with stone greys;
+   dark mode stays charcoal. Every text pair is at least 4.5:1 and every data
+   graphic at least 3:1 (WCAG AA), checked against Tailwind's colour values:
+   light: ink 15.92, muted 6.95, accent 4.76, axis 6.95, volume bars 4.37
+   dark:  ink 16.91, muted 7.63, accent 6.85, axis 7.63, volume bars 4.18 */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-  --muted: var(--color-neutral-500);       /* secondary text */
-  --line: var(--color-neutral-200);        /* borders, table rules */
-  --skeleton: var(--color-neutral-100);
-  --accent: var(--color-orange-700);      /* the one accent: signal marks; 5.23 */
-  --chart-axis: var(--color-neutral-600);  /* 7.80 on white */
-  --chart-grid: var(--color-neutral-100);
+  --background: #f7f4ec;                    /* paper */
+  --foreground: var(--color-stone-900);    /* ink */
+  --muted: var(--color-stone-600);         /* secondary text */
+  --line: var(--color-stone-300);          /* dividers, table rules */
+  --skeleton: var(--color-stone-200);
+  --accent: var(--color-orange-700);       /* the one accent: signal marks */
+  --chart-axis: var(--color-stone-600);
+  --chart-grid: var(--color-stone-200);    /* faint rules at clock times and prices */
   --chart-price: var(--foreground);        /* ink */
-  --chart-volume: var(--color-neutral-500); /* bars: 4.73, >= 3:1 for graphics */
+  --chart-volume: var(--color-stone-500);
 }
 
 @media (prefers-color-scheme: dark) {
