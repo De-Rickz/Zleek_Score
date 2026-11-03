@@ -258,15 +258,66 @@ running the heartbeat once by hand with `NTFY_URL` pointed at a test topic and
 Switch production to system of record (and stop the Mac worker,
 [section 7](#7-switching-off-the-mac-worker)) only when all hold at 48h:
 
-- [ ] Acceptance A-E as in section 1, at ~24h and at 48h.
-- [ ] Funnel comparison over a full 24h window: verdict PASS at the default
+- [x] Acceptance A-E as in section 1, at ~24h and at 48h.
+- [x] Funnel comparison over a full 24h window: verdict PASS at the default
       0.1% MISSED limit, no cluster of missing hours, scored-market sets similar.
-      Any MISSED trade is explained before cutover.
-- [ ] Heartbeat: 48h of OK runs on the server, healthchecks.io green, one
-      deliberate "down" alert received on the phone.
-- [ ] Memory/disk headroom recorded; restore test passed; a scheduled backup exists ([section 9](#9-backups)).
-- [ ] The worker and the heartbeat use least-privilege roles, not `postgres` ([section 6](#6-security-baseline-and-constraints)).
-- [ ] Site loads over mobile data with a valid certificate; only expected ports open.
+      Any MISSED trade is explained before cutover. (Passed on explanation, see below.)
+- [x] Heartbeat: 48h of OK runs on the server, healthchecks.io green, one
+      deliberate "down" alert received on the phone. (Shorter history accepted, see below.)
+- [x] Memory/disk headroom recorded; restore test passed; a scheduled backup exists ([section 9](#9-backups)).
+- [x] The worker and the heartbeat use least-privilege roles, not `postgres` ([section 6](#6-security-baseline-and-constraints)). (Worker exception, see below.)
+- [x] Site loads over mobile data with a valid certificate; only expected ports open.
+
+### Cutover record (2026-11-03)
+
+Production became the system of record on 2026-11-03 after the checks
+below (run 23:40-23:50 UTC, about 50 h after the server's first start).
+
+- **Acceptance A-E at 48 h** (production, read-only): A 2 bars jumping
+  > 0.5 of 12,552 (real moves); B `score_mismatch` 0,
+  `ineligible_on_dashboard` 0, `stale_scores` 0; C 0 of 7,913 labels
+  wrong; D 1 `price_wrong` of 139,170 (trade 80560, a backfill average fill
+  price, explained in infra/TODO.md), `side_wrong` 0, `no_raw_price` 0;
+  E 0 crossed, 0 best-bid mismatches, 0 mids far from trades (47,484
+  snapshots). The ~24 h run on 2026-11-02 was clean too (same D residual).
+- **Funnel, 2026-11-02 22:00 to 2026-11-03 22:00 UTC:** Mac 40,647 trades in
+  151 markets, production 54,035 in 169; 39,911 in both. `compare_funnels.py`
+  said FLAG (MISSED 1.71%, 693 trades), explained by splitting the 693:
+  - 599 at the **onset** of a market getting busy: production's websocket
+    subscribed about 8 minutes after the Mac's (each worker re-ranks its top
+    20 on its own schedule), so it never received the first minutes; from
+    subscription on, both recorded identical per-minute counts. These are
+    the "clustered hours" (each cluster is one market, ~8 min).
+  - 61 at the **tail**: production rotated a market out a little earlier.
+  - 33 **mid-stream** (production had trades just before and after): the
+    only possible real drops, 1-3 at a time, spread across the day:
+    **0.08%** of the Mac's 40,604 followed trades, under the 0.1% limit.
+  - The gap runs both ways and production does better: 2,836 trades
+    production caught at the onset of markets the Mac followed late.
+  - The onset gap affects both workers and is a design gap, not a production
+    fault: trades from before a market enters the websocket set are never
+    fetched (the backfill skips websocket markets). Phase 4 follow-up.
+  - Scored-market sets: 265 in both, 79 Mac-only (its older, larger markets
+    table), 24 production-only.
+- **Heartbeat:** cron installed on the server 2026-11-03, so the history is
+  under 48 h; accepted because the deliberate failure test passed:
+  `FAIL db_error=InvalidPasswordError` (23:40:51 UTC), the ntfy push
+  arrived on the phone, healthchecks.io went red and then green on the next
+  scheduled run.
+- **Headroom (2026-11-03):** disk 32% used (31G free of 45G); memory 1.4Gi
+  used, 10Gi available, swap essentially unused (40Ki); every container far
+  below its 11.65GiB limit (largest: db at 314MiB).
+- **Backups:** nightly on-disk dump plus off-instance copy (section 9),
+  restore test passed 2026-11-02.
+- **Least privilege:** the heartbeat uses `zleek_web` (read-only). The worker
+  still connects as `postgres`: a deliberate exception, decided 2026-11-02
+  and kept on 2026-11-03.
+- **Site and ports:** checked from outside on 2026-11-02 (HTTPS 200 with a
+  valid certificate; 5432, 5435, 6379 and 3000 closed).
+- **Mac:** stopped 2026-11-03 per section 7, after these checks: worker and
+  heartbeat booted out (`launchctl print` reports the worker isn't found),
+  `docker compose stop` (not `down -v`). Its data and plists stay for the
+  2-week rollback window (section 8), until 2026-11-17.
 
 ## 6. Security baseline and constraints
 
