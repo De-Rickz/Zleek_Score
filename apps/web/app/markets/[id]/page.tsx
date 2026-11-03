@@ -1,4 +1,5 @@
 // app/markets/[id]/page.tsx
+import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getBars, getLatestFeatures, getMarket, getRecentTrades, getSignal } from '@/lib/queries'
@@ -7,6 +8,14 @@ import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
 
 export const dynamic = 'force-dynamic'
+
+// Tab/link title, e.g. "Will the Democrats win ...? · Zleek Score" (template in
+// app/layout.tsx). Unknown ids fall back to the default title; the page 404s.
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
+  const { id } = await params
+  const market = await getMarket(id)
+  return market ? { title: market.title } : {}
+}
 
 // params is a Promise in Next 15+/16, so it must be awaited
 export default async function MarketPage({ params }: { params: Promise<{ id: string }> }) {

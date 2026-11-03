@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Zleek Score",
+  title: { default: "Zleek Score", template: "%s · Zleek Score" },
   description: "Polymarket markets ranked by tremor score, a 0-100 measure of unusual price movement.",
 };
 

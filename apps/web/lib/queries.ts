@@ -1,5 +1,6 @@
 // lib/queries.ts. Tagged templates are parameterized (injection-safe).
 // Never string-concat SQL.
+import { cache } from 'react'
 import { sql } from './db'
 import type { Bar, Features, Market, MarketRow, Signal, Trade } from './types'
 
@@ -7,12 +8,14 @@ import type { Bar, Features, Market, MarketRow, Signal, Trade } from './types'
 const plain = <T extends object>(rows: readonly T[]): T[] =>
   Array.from(rows, (r) => ({ ...r }))
 
-export async function getMarket(id: string): Promise<Market | null> {
+// cache(): the detail page's generateMetadata and the page itself both ask for
+// the market; this makes it one query per request.
+export const getMarket = cache(async (id: string): Promise<Market | null> => {
   const rows = await sql<Market[]>`
     SELECT id, title, category, status, liquidity_usd::float8 AS liquidity_usd
     FROM markets WHERE id = ${id} LIMIT 1`
   return rows[0] ? { ...rows[0] } : null
-}
+})
 
 export async function getBars(marketId: string, limit = 500) {
   const rows = await sql<Bar[]>`
