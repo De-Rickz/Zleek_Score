@@ -49,6 +49,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Heartbeat check, run by host cron as a one-off container (docs/parallel-run.md
+  # section 3c): `docker compose -f docker-compose.prod.yml run --rm --no-deps heartbeat`.
+  # The "cron" profile keeps `up` from ever starting it, and its own image name
+  # means building it never changes the worker's image or container.
+  heartbeat:
+    build:
+      context: ./apps/worker
+    image: zleek-heartbeat
+    profiles: ["cron"]
+    env_file:
+      - ./apps/worker/.env.heartbeat   # server only, gitignored; DATABASE_URL uses zleek_web (read-only)
+    command: ["python", "/app/scripts/heartbeat.py"]
+    depends_on:
+      - db
+
   web:
     build:
       context: ./apps/web
