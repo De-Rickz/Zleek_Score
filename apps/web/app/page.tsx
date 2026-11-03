@@ -58,7 +58,7 @@ export default async function Home() {
                 <td>{m.category ?? '—'}</td>
                 <td className="text-right tabular-nums">{usd(m.liquidity_usd)}</td>
                 <td className="text-right"><ScoreBadge score={m.tremor_score} /></td>
-                <td className="text-right text-muted">{timeAgo(m.scored_at_ms)}</td>
+                <td className="text-right text-muted tabular-nums">{timeAgo(m.scored_at_ms)}</td>
               </tr>
             ))}
           </tbody>

@@ -70,7 +70,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
           <tbody>
             {trades.map((t, i) => (
               <tr key={i} className="border-t">
-                <td className="py-1 text-muted">{timeAgo(t.ts_ms)}</td>
+                <td className="py-1 text-muted tabular-nums">{timeAgo(t.ts_ms)}</td>
                 <td>{t.side}</td>
                 <td className="text-right tabular-nums">{t.price.toFixed(3)}</td>
                 <td className="text-right tabular-nums">{usd(t.size_usd)}</td>
@@ -88,7 +88,7 @@ function Stat({ label, value, sub }: { label: string; value: React.ReactNode; su
     <div className="rounded border p-4">
       <div className="text-xs text-muted">{label}</div>
       <div className="text-xl leading-8 font-semibold tabular-nums">{value}</div>
-      {sub && <div className="text-xs text-muted">{sub}</div>}
+      {sub && <div className="text-xs text-muted tabular-nums">{sub}</div>}
     </div>
   )
 }
