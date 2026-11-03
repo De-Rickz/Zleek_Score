@@ -14,9 +14,10 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 4. Coverage (Option B), in this order, measuring after each step:
    1. Add the trades(ts) index.
    2. Rank the backfill by recent volume: top 200 by 24h volume among open markets Gamma refreshed in the last 2 h, instead of by liquidity with no freshness check. On 2026-11-03 production, all 44 uncovered markets in the top 100 were crowded out of the liquidity-ranked backfill, and none of the 16 markets that traded in the last hour came from it.
-      Then check whether the dashboard's live count rises above 20 (apps/worker/scripts/dashboard-classes.sql: on 2026-11-03 production it was 20 of 248 scored markets, exactly the websocket cap). If it doesn't, the cap raise in step 3 is the main lever for coverage.
-   3. Raise the websocket cap from 20 to 100, then 200 if load allows (it would cover 14, then 35, of those 44).
-   4. Books for every scored market, then imbalance can rejoin the tremor score.
+      Then check whether the dashboard's live count rises above 20 (apps/worker/scripts/dashboard-classes.sql: on 2026-11-03 production it was 20 of 248 scored markets, exactly the websocket cap). If it doesn't, the cap raise in step 4 is the main lever for coverage.
+   3. Catch up on subscribe: when the worker subscribes to a new market, backfill its last ~15 minutes from the Data API. Trades from before a market enters the websocket set are otherwise never fetched (the backfill skips websocket markets; the gap backfill only runs at startup), so the first minutes of a surge, the most interesting part for a tremor score, are lost. At the 2026-11-03 cutover check, production missed 599 such onset trades (its websocket picked markets up ~8 minutes after the Mac's) and the Mac missed 2,836 the same way.
+   4. Raise the websocket cap from 20 to 100, then 200 if load allows (it would cover 14, then 35, of those 44).
+   5. Books for every scored market, then imbalance can rejoin the tremor score.
 
    Leftovers: measure imbalance near the price (calibration item 4) once a few days of fresh order books have built up; decide on a scoring floor for frozen and penny markets (infra/TODO.md); the worker re-stamps scores every 5 minutes regardless of data age, so a stale score can look fresh for up to 4 hours; consider storing the newest bar time alongside each score.
 5. Packaging: README with architecture diagram, demo video.
