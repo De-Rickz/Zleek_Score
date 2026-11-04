@@ -48,8 +48,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# PostgreSQL data directory
+# PostgreSQL and Redis data directories (docker volumes on the server)
 postgres_data/
+redis_data/
 
 # logs and local tool settings
 *.log
