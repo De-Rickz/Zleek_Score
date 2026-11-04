@@ -4,7 +4,7 @@ import Skeleton from '@/app/components/Skeleton'
 
 export default function Loading() {
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6" aria-busy="true">
+    <main className="mx-auto max-w-5xl space-y-6 p-4 md:p-6" aria-busy="true">
       <span className="sr-only">Loading market…</span>
       <Skeleton className="h-4 w-24" />
       <div className="space-y-2">
