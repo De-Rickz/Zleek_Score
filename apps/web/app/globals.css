@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
+/* Colour tokens. Light mode is ink on warm paper (#f7f4ec) with stone greys;
+   dark mode stays charcoal. Every text pair is at least 4.5:1 and every data
+   graphic at least 3:1 (WCAG AA), checked against Tailwind's colour values:
+   light: ink 15.92, muted 6.95, accent 4.76, axis 6.95, volume bars 4.37
+   dark:  ink 16.91, muted 7.63, accent 6.85, axis 7.63, volume bars 4.18 */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --background: #f7f4ec;                    /* paper */
+  --foreground: var(--color-stone-900);    /* ink */
+  --muted: var(--color-stone-600);         /* secondary text */
+  --line: var(--color-stone-300);          /* dividers, table rules */
+  --skeleton: var(--color-stone-200);
+  --accent: var(--color-orange-700);       /* the one accent: signal marks */
+  --chart-axis: var(--color-stone-600);
+  --chart-grid: var(--color-stone-200);    /* faint rules at clock times and prices */
+  --chart-price: var(--foreground);        /* ink */
+  --chart-volume: var(--color-stone-500);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --muted: var(--color-neutral-400);
+    --line: var(--color-neutral-800);
+    --skeleton: var(--color-neutral-900);
+    --accent: var(--color-orange-500);      /* 6.85 on #0a0a0a */
+    --chart-axis: var(--color-neutral-400); /* 7.63 on #0a0a0a */
+    --chart-grid: var(--color-neutral-900);
+    --chart-price: var(--foreground);
+    --chart-volume: var(--color-neutral-500); /* 4.18 on #0a0a0a */
   }
 }
 
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-skeleton: var(--skeleton);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
+}
+
+/* Tailwind v4 borders default to currentColor (full text colour); use the
+   quieter --line everywhere instead. */
+@layer base {
+  *, ::after, ::before, ::backdrop, ::file-selector-button {
+    border-color: var(--line);
+  }
+}
+
+/* No font-family here: Tailwind's base styles already apply --font-sans
+   (IBM Plex Sans, loaded in app/layout.tsx). */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
 }
