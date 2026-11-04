@@ -33,5 +33,15 @@
 - 2026-11-02, Oracle Cloud deploy: the VCN's default Security List only allowed ingress on 22. Ports 80/443 must be opened in the Security List (cloud firewall) as well as in ufw on the instance; with only ufw open, Caddy's ACME challenges (HTTP-01 and TLS-ALPN-01) timed out.
 - 2026-11-02, DNS: zleekin.com had a stale second A record (GoDaddy "WebsiteBuilder Site" parking page) next to the Oracle server's record. DNS round-robined between them, giving intermittent 403s during certificate issuance. Before relying on ACME, check that the domain resolves only to the server (`dig +short A zleekin.com`, and AAAA).
 
+## Design rules (apps/web)
+- No gradients, glow effects, glassmorphism, or dot-grid/mesh backgrounds.
+- No emoji or sparkle icons. Icons only where they carry meaning.
+- Flat surfaces with thin dividers, not shadowed cards. Left-aligned, compact, data-dense layouts.
+- Fonts: IBM Plex Sans for text, IBM Plex Mono for numbers.
+- UI copy is plain and short. No marketing words (seamless, unlock, elevate, harness, empower, effortless, cutting-edge, insights), no "AI-powered" badges, no em dashes in sentences or tooltips. A dash on its own as an empty-cell placeholder in a table is fine.
+- Visual identity: seismograph / chart recorder. Ink on paper, orange as the single accent colour.
+- These rules are a floor, not a ceiling: within them, be distinctive.
+- Contrast: text at least 4.5:1 and data graphics at least 3:1, in light and dark mode. Check new colours by computing the ratio, and check layouts with headless screenshots in both modes.
+
 ## Definition of done
 - Diff approved, test or acceptance query added, infra/TODO.md updated, and the deploy steps written out for the human.
