@@ -137,9 +137,10 @@ function MobileRow({ m, trace, start, end, score, marker }: {
         </div>
         <div className="mt-2 flex items-center justify-between gap-4">
           <Trace {...trace} start={start} end={end} />
+          {/* With the old-data marker, it replaces the plain time ("2d ago"),
+              which would only repeat it; otherwise the normal time shows. */}
           <span className="text-right font-mono text-xs text-muted tabular-nums">
-            {usd(m.liquidity_usd)} · {data == null ? '—' : timeAgo(data)}
-            {marker && <><br />{marker}</>}
+            {usd(m.liquidity_usd)} · {marker ?? (data == null ? '—' : timeAgo(data))}
           </span>
         </div>
       </Link>
