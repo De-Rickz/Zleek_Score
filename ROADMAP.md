@@ -10,8 +10,17 @@ Out until after v1 ships: auth, alerts/alert_rules, journal, billing, realtime/w
 ## Phases (in order)
 1. Data correctness: token labels, YES-equivalent prices, repair + rebuild history; scoring calibration. (done 2026-10-30: deployed; acceptance A-E pass, see apps/worker/scripts/acceptance_price_orientation.sql)
 2. Data loss: backfill from newest stored trade on startup; dead-websocket detection; Redis flush only deletes after commit. (done 2026-10-31: deployed; acceptance A-E pass. Related, still open in infra/TODO.md: events dropped while Redis is down.)
-3. Hosting: move worker, Postgres, Redis and web app together to a VPS (systemd, Caddy). Fresh database.
-4. Coverage (Option B): raise the websocket market cap; add trades(ts) index first. Books for every scored market, then imbalance can rejoin the tremor score. Leftover from phase 1: measure imbalance near the price (calibration item 4) once a few days of fresh order books have built up.
+3. Hosting: move worker, Postgres, Redis and web app together to a VPS (systemd, Caddy). Fresh database. (done 2026-11-03: cutover to the Oracle server; Mac data kept as rollback until 2026-11-17; see docs/parallel-run.md §5)
+4. Coverage (Option B), in this order, measuring after each step:
+   Soak first: phase 4 starts no earlier than 2026-11-06, and only if the heartbeat has stayed green and nothing unexplained has turned up. Frontend deploys are allowed during the soak; worker changes aren't.
+   1. Add the trades(ts) index.
+   2. Rank the backfill by recent volume: top 200 by 24h volume among open markets Gamma refreshed in the last 2 h, instead of by liquidity with no freshness check. On 2026-11-03 production, all 44 uncovered markets in the top 100 were crowded out of the liquidity-ranked backfill, and none of the 16 markets that traded in the last hour came from it.
+      Then check whether the dashboard's live count rises above 20 (apps/worker/scripts/dashboard-classes.sql: on 2026-11-03 production it was 20 of 248 scored markets, exactly the websocket cap). If it doesn't, the cap raise in step 4 is the main lever for coverage.
+   3. Catch up on subscribe: when the worker subscribes to a new market, backfill its last ~15 minutes from the Data API. Trades from before a market enters the websocket set are otherwise never fetched (the backfill skips websocket markets; the gap backfill only runs at startup), so the first minutes of a surge, the most interesting part for a tremor score, are lost. At the 2026-11-03 cutover check, production missed 599 such onset trades (its websocket picked markets up ~8 minutes after the Mac's) and the Mac missed 2,836 the same way.
+   4. Raise the websocket cap from 20 to 100, then 200 if load allows (it would cover 14, then 35, of those 44).
+   5. Books for every scored market, then imbalance can rejoin the tremor score.
+
+   Leftovers: measure imbalance near the price (calibration item 4) once a few days of fresh order books have built up; decide on a scoring floor for frozen and penny markets (infra/TODO.md); the worker re-stamps scores every 5 minutes regardless of data age, so a stale score can look fresh for up to 4 hours; consider storing the newest bar time alongside each score.
 5. Packaging: README with architecture diagram, demo video.
 6. Ship: pick a date once the VPS has run stable through phase 4.
 
