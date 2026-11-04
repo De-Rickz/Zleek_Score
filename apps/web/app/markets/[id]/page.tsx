@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { getBars, getLatestFeatures, getMarket, getPriceChangeRow, getRecentTrades, getSignal } from '@/lib/queries'
 import { describeChange } from '@/lib/priceChange'
+import { isLive, oldDataMarker, SCORE_WINDOW_MS } from '@/lib/freshness'
 import { fixed, timeAgo, usd } from '@/lib/format'
 import AutoRefresh from '@/app/components/AutoRefresh'
 import PriceChart from '@/app/components/PriceChart'
@@ -34,6 +35,11 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   // Server Component: runs once per request, so reading the time is safe.
   // eslint-disable-next-line react-hooks/purity
   const renderedAt = Date.now()
+  // Same rule as the dashboard: with fewer than 10 bars in the last 4 hours the
+  // worker has nothing to measure, so show "not live" rather than a 0.
+  const live = isLive(bars.filter((b) => b.bucket_ms > renderedAt - SCORE_WINDOW_MS).length)
+  const lastTradeMs = trades[0]?.ts_ms ?? null   // recent trades are newest first
+  const marker = live ? oldDataMarker(lastTradeMs, renderedAt) : null
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-6">
@@ -57,11 +63,16 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
           <Label>Tremor score</Label>
           <div className="flex items-baseline gap-4">
             <span className="font-mono text-xl leading-8 font-semibold tabular-nums">
-              {signal?.tremor_score == null ? '—' : Math.round(signal.tremor_score)}
+              {!live || signal?.tremor_score == null ? '—' : Math.round(signal.tremor_score)}
             </span>
-            {signal && <span className="font-mono text-xs text-muted">scored {timeAgo(signal.scored_at_ms)}</span>}
+            {/* Age of the data, not when scoring last ran (the worker re-stamps every 5 min) */}
+            {!live
+              ? <span className="text-xs text-muted">not live: too little trading in the last 4 hours to score</span>
+              : marker
+                ? <span className="font-mono text-xs text-muted">{marker}</span>
+                : lastTradeMs != null && <span className="font-mono text-xs text-muted">last trade {timeAgo(lastTradeMs)}</span>}
           </div>
-          <ScoreScale score={signal?.tremor_score ?? null} />
+          <ScoreScale score={live ? signal?.tremor_score ?? null : null} />
         </div>
         {/* Ink, not orange: the arrow and sign carry the direction. Tooltip gives
             the reference time or why there's no change. */}

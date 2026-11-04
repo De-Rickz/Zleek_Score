@@ -22,9 +22,9 @@ const logOdds = (p: number) => {
 // cheap and near-certain prices need three decimals to show a move
 const fmt = (p: number) => (p < 0.1 || p > 0.9 ? p.toFixed(3) : p.toFixed(2))
 
-export default function Trace({ prior, points, start, end }: {
-  prior: number | null; points: TracePoint[]; start: number; end: number
-}) {
+export type TraceData = { prior: number | null; points: TracePoint[] }
+
+export default function Trace({ prior, points, start, end }: TraceData & { start: number; end: number }) {
   const open = prior ?? points[0]?.close ?? null
   if (open == null) {
     // no price in the last 24 hours: baseline only

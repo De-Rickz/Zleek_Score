@@ -2,7 +2,7 @@
 // Never string-concat SQL.
 import { cache } from 'react'
 import { sql } from './db'
-import type { Bar, Features, Market, MarketRow, Signal, Trade } from './types'
+import type { Bar, DashboardRow, Features, Market, Signal, Trade } from './types'
 import type { PriceChangeRow } from './priceChange'
 
 // postgres.js returns array/row subclasses; hand Next plain objects.
@@ -28,16 +28,26 @@ export async function getBars(marketId: string, limit = 500) {
     ORDER BY bucket DESC LIMIT ${limit}`
   return plain(rows).reverse()
 }
-export async function getMarketsByTremor(limit = 100) {
-  return plain(await sql<MarketRow[]>`
+// Every scored market with what the dashboard's ended and freshness rules need
+// (lib/freshness.ts decides; this only reads). All indexed per-market lookups.
+export async function getDashboardRows() {
+  return plain(await sql<DashboardRow[]>`
     SELECT m.id, m.title, m.category, m.status,
            m.liquidity_usd::float8 AS liquidity_usd,
            s.tremor_score::float8 AS tremor_score,
-           (extract(epoch FROM s.ts) * 1000)::float8 AS scored_at_ms
+           (extract(epoch FROM s.ts) * 1000)::float8 AS scored_at_ms,
+           coalesce(m.raw->>'closed', 'false') = 'true' AS gamma_closed,
+           coalesce(m.raw->>'acceptingOrders', 'true') <> 'false' AS accepting_orders,
+           CASE WHEN m.raw->>'endDate' ~ '^[0-9]{4}-'
+                THEN (extract(epoch FROM (m.raw->>'endDate')::timestamptz) * 1000)::float8 END AS end_ms,
+           (extract(epoch FROM lt.ts) * 1000)::float8 AS last_trade_ms,
+           (extract(epoch FROM lb.bucket) * 1000)::float8 AS last_bar_ms,
+           (SELECT count(*) FROM bars_1m b
+            WHERE b.market_id = s.market_id AND b.bucket > now() - interval '240 minutes')::int AS bars_in_window
     FROM signals_latest s
     JOIN markets m ON m.id = s.market_id
-    ORDER BY s.tremor_score DESC
-    LIMIT ${limit}`)
+    LEFT JOIN LATERAL (SELECT max(ts) AS ts FROM trades t WHERE t.market_id = s.market_id) lt ON true
+    LEFT JOIN LATERAL (SELECT max(bucket) AS bucket FROM bars_1m b WHERE b.market_id = s.market_id) lb ON true`)
 }
 
 export async function getSignal(marketId: string): Promise<Signal | null> {

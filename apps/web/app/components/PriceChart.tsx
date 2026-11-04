@@ -71,7 +71,8 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
             yAxisID: 'y', pointRadius: 0, borderWidth: 2, stepped: 'before',
             borderColor: token('--chart-price'), backgroundColor: token('--chart-price') },
           { type: 'bar', label: 'Volume (USD)', data: bars.map((b) => ({ x: b.bucket_ms, y: b.volume_usd })),
-            yAxisID: 'y1', backgroundColor: token('--chart-volume') },
+            // capped: on a time axis a lone bar would otherwise fill the chart
+            yAxisID: 'y1', backgroundColor: token('--chart-volume'), maxBarThickness: 6 },
         ],
       },
       plugins: [penHead(token('--accent'))],
