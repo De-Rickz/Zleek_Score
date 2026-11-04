@@ -42,7 +42,7 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   const marker = live ? oldDataMarker(lastTradeMs, renderedAt) : null
 
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-6">
+    <main className="mx-auto max-w-5xl space-y-6 p-4 md:p-6">
       <AutoRefresh />
       <div className="flex items-baseline justify-between gap-4">
         <Link href="/" className="text-sm text-muted hover:underline">← Markets</Link>
@@ -57,9 +57,10 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
       </header>
 
       {/* Readout strip: flat, thin dividers. Tremor score as an instrument
-          reading; z-score and imbalance as smaller readings beside it. */}
-      <section className="grid grid-cols-[2fr_1fr_1fr_1fr] divide-x border-y">
-        <div className="py-4 pr-6">
+          reading; the smaller readings beside it from 768 px (md) up, and in a
+          row of three under it on a phone. */}
+      <section className="border-y md:grid md:grid-cols-[2fr_3fr]">
+        <div className="py-4 md:pr-6">
           <Label>Tremor score</Label>
           <div className="flex items-baseline gap-4">
             <span className="font-mono text-xl leading-8 font-semibold tabular-nums">
@@ -74,20 +75,22 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
           </div>
           <ScoreScale score={live ? signal?.tremor_score ?? null : null} />
         </div>
-        {/* Ink, not orange: the arrow and sign carry the direction. Tooltip gives
-            the reference time or why there's no change. */}
-        <Reading label="1h change"
-                 value={change.kind === 'change'
-                   ? <>{change.arrow && <span className="mr-1 align-[0.1em] text-xs">{change.arrow}</span>}{change.value}</>
-                   : '—'}
-                 title={change.kind === 'change' ? change.label : change.reason}
-                 note={change.kind === 'change' ? `since ${new Date(change.refMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : change.reason} />
-        <Reading label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'}
-                 note="3 or more scores 100" />
-        {/* Not part of the tremor score; null when the book is stale or one-sided */}
-        <Reading label="Order-book imbalance"
-                 value={features?.ob_imbalance != null ? fixed(features.ob_imbalance, 2) : 'n/a'}
-                 note={features?.ob_imbalance != null ? 'whole book, incl. orders far from the price' : undefined} />
+        <div className="grid grid-cols-3 divide-x border-t md:border-t-0 md:border-l">
+          {/* Ink, not orange: the arrow and sign carry the direction. Tooltip gives
+              the reference time or why there's no change. */}
+          <Reading label="1h change"
+                   value={change.kind === 'change'
+                     ? <>{change.arrow && <span className="mr-1 align-[0.1em] text-xs">{change.arrow}</span>}{change.value}</>
+                     : '—'}
+                   title={change.kind === 'change' ? change.label : change.reason}
+                   note={change.kind === 'change' ? `since ${new Date(change.refMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : change.reason} />
+          <Reading label="Price z-score" value={features ? fixed(features.price_zscore, 2) : '—'}
+                   note="3 or more scores 100" />
+          {/* Not part of the tremor score; null when the book is stale or one-sided */}
+          <Reading label="Order-book imbalance"
+                   value={features?.ob_imbalance != null ? fixed(features.ob_imbalance, 2) : 'n/a'}
+                   note={features?.ob_imbalance != null ? 'whole book, incl. orders far from the price' : undefined} />
+        </div>
       </section>
 
       <section>
@@ -134,7 +137,7 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function Reading({ label, value, note, title }: { label: string; value: React.ReactNode; note?: string; title?: string }) {
   return (
-    <div className="px-6 py-4" title={title}>
+    <div className="px-3 py-4 first:pl-0 md:px-6 md:first:pl-6" title={title}>
       <Label>{label}</Label>
       <div className="font-mono text-xl leading-8 font-semibold tabular-nums">{value}</div>
       {note && <div className="text-xs text-muted">{note}</div>}

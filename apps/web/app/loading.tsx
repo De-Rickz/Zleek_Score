@@ -5,7 +5,7 @@ import Skeleton from './components/Skeleton'
 
 export default function Loading() {
   return (
-    <main className="mx-auto max-w-5xl p-6" aria-busy="true">
+    <main className="mx-auto max-w-5xl p-4 md:p-6" aria-busy="true">
       <span className="sr-only">Loading markets…</span>
       <div className="mb-4 flex items-baseline justify-between">
         <Skeleton className="h-8 w-64" />

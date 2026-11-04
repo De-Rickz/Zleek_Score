@@ -46,7 +46,7 @@ export default async function Home() {
   const traceWindow = { start: renderedAt - TRACE_WINDOW_MS, end: renderedAt }
 
   return (
-    <main className="mx-auto max-w-5xl p-6">
+    <main className="mx-auto max-w-5xl p-4 md:p-6">
       <AutoRefresh />
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h1 className="text-xl font-semibold">Markets by Tremor Score</h1>
@@ -63,16 +63,9 @@ export default async function Home() {
         <p className="text-sm text-muted">No scored markets yet.</p>
       ) : (
         <>
-          <MarketTable head>
-            {live.map((m) => (
-              <Row key={m.id} m={m} trace={traces.get(m.id)!} {...traceWindow}>
-                {oldDataMarker(lastDataMs(m), renderedAt) && (
-                  <span className="mr-2 font-mono text-xs text-muted">{oldDataMarker(lastDataMs(m), renderedAt)}</span>
-                )}
-                <ScoreBadge score={m.tremor_score} />
-              </Row>
-            ))}
-          </MarketTable>
+          <Markets head rows={live} traces={traces} {...traceWindow}
+                   score={(m) => <ScoreBadge score={m.tremor_score} />}
+                   marker={(m) => oldDataMarker(lastDataMs(m), renderedAt)} />
 
           {notLiveAll.length > 0 && (
             // Native disclosure: no JavaScript, keyboard accessible, and it keeps
@@ -82,15 +75,13 @@ export default async function Home() {
                 {notLiveSummary(notLiveAll.length)}
                 {notLiveAll.length > notLive.length && `, showing ${notLive.length} by liquidity`}
               </summary>
-              <MarketTable>
-                {notLive.map((m) => (
-                  <Row key={m.id} m={m} trace={traces.get(m.id)!} {...traceWindow}>
-                    <span className="font-mono text-muted" title="Not live: too little trading in the last 4 hours to score">
-                      — <span className="text-xs">not live</span>
-                    </span>
-                  </Row>
-                ))}
-              </MarketTable>
+              <Markets rows={notLive} traces={traces} {...traceWindow}
+                       score={() => (
+                         <span className="font-mono text-muted" title="Not live: too little trading in the last 4 hours to score">
+                           — <span className="text-xs">not live</span>
+                         </span>
+                       )}
+                       marker={() => null} />
             </details>
           )}
         </>
@@ -99,11 +90,69 @@ export default async function Home() {
   )
 }
 
+type MarketsProps = {
+  rows: DashboardRow[]
+  traces: Map<string, TraceData>
+  start: number
+  end: number
+  head?: boolean
+  score: (m: DashboardRow) => React.ReactNode
+  marker: (m: DashboardRow) => string | null
+}
+
+// The same rows two ways, one shown at a time: a table from 768 px (md) up, and
+// below that a stacked list, one tappable row per market (title and badge,
+// then trace, liquidity and data age), the usual phone pattern for wide tables.
+function Markets({ rows, traces, start, end, head = false, score, marker }: MarketsProps) {
+  return (
+    <>
+      <MarketTable head={head}>
+        {rows.map((m) => (
+          <Row key={m.id} m={m} trace={traces.get(m.id)!} start={start} end={end}>
+            {marker(m) && <span className="mr-2 font-mono text-xs text-muted">{marker(m)}</span>}
+            {score(m)}
+          </Row>
+        ))}
+      </MarketTable>
+      <ul className="md:hidden">
+        {rows.map((m) => (
+          <MobileRow key={m.id} m={m} trace={traces.get(m.id)!} start={start} end={end}
+                     score={score(m)} marker={marker(m)} />
+        ))}
+      </ul>
+    </>
+  )
+}
+
+function MobileRow({ m, trace, start, end, score, marker }: {
+  m: DashboardRow; trace: TraceData; start: number; end: number; score: React.ReactNode; marker: string | null
+}) {
+  const data = lastDataMs(m)
+  return (
+    <li className="border-t">
+      <Link href={`/markets/${encodeURIComponent(m.id)}`} className="block py-3">
+        <div className="flex items-start justify-between gap-4">
+          <span className="line-clamp-2 text-sm">{m.title}</span>
+          <span className="shrink-0 whitespace-nowrap">{score}</span>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-4">
+          <Trace {...trace} start={start} end={end} />
+          {/* With the old-data marker, it replaces the plain time ("2d ago"),
+              which would only repeat it; otherwise the normal time shows. */}
+          <span className="text-right font-mono text-xs text-muted tabular-nums">
+            {usd(m.liquidity_usd)} · {marker ?? (data == null ? '—' : timeAgo(data))}
+          </span>
+        </div>
+      </Link>
+    </li>
+  )
+}
+
 // Both tables share fixed column widths so the expanded not-live rows line up
-// with the live rows above them.
+// with the live rows above them. Desktop only (hidden below md).
 function MarketTable({ head = false, children }: { head?: boolean; children: React.ReactNode }) {
   return (
-    <table className="w-full table-fixed text-sm">
+    <table className="hidden w-full table-fixed text-sm md:table">
       <colgroup>
         <col />
         <col className="w-28" />

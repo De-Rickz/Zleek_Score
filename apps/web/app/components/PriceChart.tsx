@@ -105,5 +105,5 @@ export default function PriceChart({ bars }: { bars: Point[] }) {
     return () => chart.destroy()
   }, [bars])
 
-  return <div className="h-80"><canvas ref={ref} /></div>
+  return <div className="h-64 md:h-80"><canvas ref={ref} /></div>
 }
