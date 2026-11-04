@@ -11,6 +11,7 @@
 - One change at a time: show the diff, explain in 2-3 bullets, wait for approval.
 - Every fix adds or updates a test or an acceptance query that would have caught the bug.
 - After each task, update infra/TODO.md.
+- Never use `git checkout --`, `git restore` or `git reset --hard` on files with uncommitted work: they discard it. Commit (or stash) before making a temporary edit, then revert the temporary edit with a normal commit or a reverse patch, and confirm `git diff` is empty afterwards. (2026-11-03: a `git checkout -- app/page.tsx` meant to undo a one-line screenshot edit would have thrown away a whole uncommitted feature.)
 
 ## Priorities (in order)
 1. Data correctness: wrong numbers in the product
