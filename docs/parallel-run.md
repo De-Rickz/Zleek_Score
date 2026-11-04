@@ -435,6 +435,8 @@ dump's newest trade, and run `apps/worker/scripts/acceptance_price_orientation.s
 on the copy (C, D, E should be 0; A and B depend on `now()` and look stale).
 Do it once now and after any TimescaleDB image upgrade (restores need the
 same TimescaleDB version: 2.31.0-pg16, pinned in `docker-compose.prod.yml`).
+From 2026-11: scripted and monthly, `infra/backup/zleek-restore-test.sh`
+(docs/storage-plan.md), with a FAIL pushed to ntfy.
 
 **Off-instance copy** (installed 2026-11-02): with `ZLEEK_BACKUP_REMOTE` set,
 each run copies every local dump the bucket doesn't have yet with `rclone copy
