@@ -1,0 +1,132 @@
+{
+ "recorded_at_unix": 1793979308,
+ "conditions": [
+  "0x0feb1652f58ee63063037a37a67423c09a9a2d875dba0d568d09c8133f7d3f20",
+  "0xc44b19502032b76cc58c9c73d63cb9729f3194bc93694f495c5e32e8b0c175f9"
+ ],
+ "page1": {
+  "data": [
+   {
+    "proxy_wallet": "0x1f6be1abb889a75aa3c953497213120d50831c96",
+    "side": "BUY",
+    "token_id": "24556241795224255391778012137770899792438224419987268939490744712157662256785",
+    "condition_id": "0xc44b19502032b76cc58c9c73d63cb9729f3194bc93694f495c5e32e8b0c175f9",
+    "size": 6.036583,
+    "price": 0.8199999901,
+    "timestamp": 1793979073,
+    "outcome": "Yes",
+    "outcome_index": 0,
+    "transaction_hash": "0x978ab244696dc2986dda8cc5f27a45a0c2fe4c27754bc948606066a2a711e11a",
+    "title": "Will SK Rapid win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0x821dab0565ebf5b327f51db06223fdcfe01acf16",
+    "side": "BUY",
+    "token_id": "37843600713572657179957147346652209888978981464872177003245392387478910043870",
+    "condition_id": "0x0feb1652f58ee63063037a37a67423c09a9a2d875dba0d568d09c8133f7d3f20",
+    "size": 5.0,
+    "price": 0.29,
+    "timestamp": 1793978424,
+    "outcome": "Yes",
+    "outcome_index": 0,
+    "transaction_hash": "0x883274fb007a8562f61c6ff67308e1900a353feaf262ab3e0bead77fc828b38e",
+    "title": "Will FK Rubin Kazan win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0x821dab0565ebf5b327f51db06223fdcfe01acf16",
+    "side": "BUY",
+    "token_id": "37843600713572657179957147346652209888978981464872177003245392387478910043870",
+    "condition_id": "0x0feb1652f58ee63063037a37a67423c09a9a2d875dba0d568d09c8133f7d3f20",
+    "size": 115.25,
+    "price": 0.28,
+    "timestamp": 1793978392,
+    "outcome": "Yes",
+    "outcome_index": 0,
+    "transaction_hash": "0xfc0d7c03db7c85c92f3eb10949741a78ff75443080c33ae22bba39d2ca529c0a",
+    "title": "Will FK Rubin Kazan win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0x051adea0d16c85df8a8a9c7e400e0655905d1db9",
+    "side": "BUY",
+    "token_id": "37843600713572657179957147346652209888978981464872177003245392387478910043870",
+    "condition_id": "0x0feb1652f58ee63063037a37a67423c09a9a2d875dba0d568d09c8133f7d3f20",
+    "size": 0.02,
+    "price": 0.28,
+    "timestamp": 1793978392,
+    "outcome": "Yes",
+    "outcome_index": 0,
+    "transaction_hash": "0xb8b21c0108b9a3056e1563b870ec290d69529191aabbf5a2fbae145633d3e2d3",
+    "title": "Will FK Rubin Kazan win on 2026-11-06?"
+   }
+  ],
+  "pagination": {
+   "limit": 4,
+   "offset": 0,
+   "has_more": true,
+   "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJ0cmFkZXMiLCJwYXJhbXMiOnsibCI6NCwidHMiOjE3OTM5NzgzOTIsInNxIjoiOTY4NDg2MjQwMDAyMDAxNDgwIiwiZCI6NH19LCJzaWciOiI1MTVkYjU4MWM5MzIxOGVjYWUyMTA4NWQ2YTY1NDA1NSJ9"
+  }
+ },
+ "page2": {
+  "data": [
+   {
+    "proxy_wallet": "0xf80c74b0420587049edc4f2ca5ffba29ec813710",
+    "side": "BUY",
+    "token_id": "86391725025430666587615148214902425067776062366824183968709732400777399392527",
+    "condition_id": "0x0feb1652f58ee63063037a37a67423c09a9a2d875dba0d568d09c8133f7d3f20",
+    "size": 27.397259,
+    "price": 0.7299999974,
+    "timestamp": 1793977818,
+    "outcome": "No",
+    "outcome_index": 1,
+    "transaction_hash": "0x3a0ba14aebbc617a43a7557f54d13a7d5e4ef5abda9b89ad53bd8427f5652ca7",
+    "title": "Will FK Rubin Kazan win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0x1e0714db32f7fa4b9fd87dc9d4a1a6e33bf56731",
+    "side": "BUY",
+    "token_id": "24556241795224255391778012137770899792438224419987268939490744712157662256785",
+    "condition_id": "0xc44b19502032b76cc58c9c73d63cb9729f3194bc93694f495c5e32e8b0c175f9",
+    "size": 365.853655,
+    "price": 0.8199999997,
+    "timestamp": 1793976370,
+    "outcome": "Yes",
+    "outcome_index": 0,
+    "transaction_hash": "0x6c028c7fa0bed738cfe149fd544f814857ac2e2a80d1e2eaae9b2bdabfd3bf2a",
+    "title": "Will SK Rapid win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0x04e7c0770dbc82dde5b234c58e08b442ad51e578",
+    "side": "BUY",
+    "token_id": "78893390609384638446055375405958356146700194603011723725142128250011755738687",
+    "condition_id": "0xc44b19502032b76cc58c9c73d63cb9729f3194bc93694f495c5e32e8b0c175f9",
+    "size": 92.894737,
+    "price": 0.1899999997,
+    "timestamp": 1793976343,
+    "outcome": "No",
+    "outcome_index": 1,
+    "transaction_hash": "0x878a8eae1288b7bbe0f0ede5c513d44ad086e5dced4572959a0edd013c96dc04",
+    "title": "Will SK Rapid win on 2026-11-06?"
+   },
+   {
+    "proxy_wallet": "0xec9f344ac6b942bf2a8bb36ebc0294a73cd9e57b",
+    "side": "BUY",
+    "token_id": "78893390609384638446055375405958356146700194603011723725142128250011755738687",
+    "condition_id": "0xc44b19502032b76cc58c9c73d63cb9729f3194bc93694f495c5e32e8b0c175f9",
+    "size": 229.789474,
+    "price": 0.1899999997,
+    "timestamp": 1793976313,
+    "outcome": "No",
+    "outcome_index": 1,
+    "transaction_hash": "0xe8df0ee09316307c64b33cee9f62bf4fdc3f46f4db0deabc319ef52b5b6975b3",
+    "title": "Will SK Rapid win on 2026-11-06?"
+   }
+  ],
+  "pagination": {
+   "limit": 4,
+   "offset": 4,
+   "has_more": true,
+   "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJ0cmFkZXMiLCJwYXJhbXMiOnsibCI6NCwidHMiOjE3OTM5NzYzMTMsInNxIjoiOTY4NDcyMzgwMDA3MTEzODIwIiwiZCI6OH19LCJzaWciOiI3ZmFhN2I0MGNlNTQ0NmY3N2ZhMTkwYWIxMWI4Zjg5ZSJ9"
+  }
+ },
+ "note": "GET /v2/trades?condition=<2 ids>&limit=4, then the same with cursor=page1.next_cursor. Trader names, bios and profile images removed."
+}

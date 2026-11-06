@@ -120,13 +120,15 @@ async def check_data_api(conn, n_markets):
     by_hash = collections.defaultdict(set)
     async with httpx.AsyncClient(base_url="https://data-api.polymarket.com", timeout=20) as client:
         for cid in conds:
-            resp = await client.get("/trades", params={"market": cid, "limit": 500})
-            if resp.status_code == 429:
-                await asyncio.sleep(10)
-                resp = await client.get("/trades", params={"market": cid, "limit": 500})
+            # Data API v2 (v1 /trades retired 2026-11-02): condition=, {"data": [...]},
+            # snake_case fields; one fill per row, on its taker side (taker_only default)
+            resp = await client.get("/v2/trades", params={"condition": cid, "limit": 500})
+            if resp.status_code in (429, 503):
+                await asyncio.sleep(float(resp.headers.get("Retry-After") or 10))
+                resp = await client.get("/v2/trades", params={"condition": cid, "limit": 500})
             resp.raise_for_status()
-            for t in resp.json():
-                by_hash[t["transactionHash"]].add(fill_key(t.get("asset"), t.get("size", 0), t.get("price", 0)))
+            for t in resp.json()["data"]:
+                by_hash[t["transaction_hash"]].add(fill_key(t.get("token_id"), t.get("size", 0), t.get("price", 0)))
             await asyncio.sleep(1)  # the Data API rate-limits quickly
     return report(f"4. Data API sample ({len(conds)} busiest backfilled markets, last 500 fills each)", by_hash)
 
