@@ -183,6 +183,11 @@ demand:
       - db
 ```
 
+The heartbeat has three checks (2026-11-06): `signals` and `trades` (newest
+live websocket trade) within 15 min, and `backfill` (newest trade stored by the
+Data API backfill) within 2 h (`HEARTBEAT_BACKFILL_STALE_MIN`). After changing
+`heartbeat.py`, rebuild its image: `$PROD --profile cron build heartbeat`.
+
 `./apps/worker/.env.heartbeat` (on the server only; make sure it's gitignored):
 ```sh
 DATABASE_URL=postgresql://zleek_web:<zleek_web password>@db:5432/postgres   # read-only role, never postgres
@@ -314,6 +319,19 @@ below (run 23:40-23:50 UTC, about 50 h after the server's first start).
   and kept on 2026-11-03.
 - **Site and ports:** checked from outside on 2026-11-02 (HTTPS 200 with a
   valid certificate; 5432, 5435, 6379 and 3000 closed).
+- **Missed by this cutover check (found 2026-11-06):** Polymarket retired
+  Data API v1 on 2026-11-02; from 22:27 UTC that day every backfill request
+  (periodic and startup gap) failed with HTTP 410, on both machines. The
+  parallel run could not see it: the Mac and production ran the same v1 code,
+  so the funnel comparison, which only measures one machine against the
+  other, saw two equally empty backfills and nothing missing between them
+  (production's 748 backfill trades in that window most likely all came from
+  22:00-22:27 on 11-02, before the retirement; not yet confirmed). The
+  heartbeat didn't either, because the websocket kept "trades" fresh.
+  **Lesson: relative comparisons need absolute checks alongside them.** Fixed
+  in ROADMAP phase 4 step 2b: the backfill moved to Data API v2, and the
+  heartbeat now has an absolute "backfill" check (a backfilled trade within
+  the last 2 h), alerting through ntfy and healthchecks.io.
 - **Mac:** stopped 2026-11-03 per section 7, after these checks: worker and
   heartbeat booted out (`launchctl print` reports the worker isn't found),
   `docker compose stop` (not `down -v`). Its data and plists stay for the

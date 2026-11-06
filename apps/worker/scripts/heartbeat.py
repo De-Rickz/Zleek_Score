@@ -2,8 +2,8 @@
 Worker heartbeat, run every 15 min: by launchd on the Mac (com.zleek.heartbeat),
 by cron in a one-off container on the production server (docs/parallel-run.md).
 
-Two checks, read-only via the zleek_web role (the frontend's DATABASE_URL in
-apps/web/.env.local); each shows its own macOS notification when stale:
+Three checks, read-only via the zleek_web role (the frontend's DATABASE_URL in
+apps/web/.env.local); each sends its own alert when stale:
 
   signals  newest signals_latest.ts: the scoring loop is alive.
   trades   newest LIVE websocket trade: data is actually flowing. Needed
@@ -12,6 +12,12 @@ apps/web/.env.local); each shows its own macOS notification when stale:
            never makes signals stale (see the clob_ws keepalive item in
            infra/TODO.md). Backfill rows are excluded because they keep
            arriving while the websocket is dead.
+  backfill newest BACKFILLED trade (raw is the Data API object), within 2 h
+           (HEARTBEAT_BACKFILL_STALE_MIN). Added 2026-11-06 after Data API v1
+           was retired: every backfill request failed for days and nothing
+           noticed, because the websocket kept "trades" fresh. Looks back
+           at most a day (cheap with the trades(ts) index); no backfill trade
+           in that day reports as none.
 
 After the Mac sleeps both checks fail together on wake; that is the worker
 being suspended, not a websocket fault.
@@ -46,6 +52,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")
 ENV_FILE = os.path.join(ROOT, "apps", "web", ".env.local")
 LOG_FILE = os.environ.get("HEARTBEAT_LOG") or os.path.join(ROOT, "apps", "worker", "ingestion", "heartbeat.log")
 STALE_AFTER = timedelta(minutes=15)
+BACKFILL_STALE_AFTER = timedelta(minutes=int(os.environ.get("HEARTBEAT_BACKFILL_STALE_MIN", "120")))
 HTTP_TIMEOUT_SEC = 10
 
 
@@ -68,7 +75,9 @@ async def newest_timestamps():
         # backfilled trades store the Data API object.
         trades = await conn.fetchval(
             "SELECT MAX(ts) FROM trades WHERE jsonb_typeof(raw) = 'string'")
-        return signals, trades
+        backfill = await conn.fetchval(
+            "SELECT MAX(ts) FROM trades WHERE ts > now() - interval '1 day' AND jsonb_typeof(raw) = 'object'")
+        return signals, trades, backfill
     finally:
         await conn.close()
 
@@ -124,7 +133,16 @@ CHECKS = {
                 "Zleek Score worker may be down — signals_latest is empty"),
     "trades": ("No fresh trade data in {m}min (scoring job may be masking an upstream failure)",
                "No live trade data at all (scoring job may be masking an upstream failure)"),
+    "backfill": ("Backfill has stored no trades in {m}min: Data API requests may be failing "
+                 "(worker logs: 'Backfill error')",
+                 "Backfill has stored no trades in over a day: Data API requests may be failing "
+                 "(worker logs: 'Backfill error')"),
 }
+
+
+def stale_after(name):
+    """Threshold per check; read at run time so tests can override it."""
+    return BACKFILL_STALE_AFTER if name == "backfill" else STALE_AFTER
 
 
 def main():
@@ -147,13 +165,13 @@ def main():
             continue
         gap = now - ts
         gap_min = int(gap.total_seconds() // 60)
-        if gap > STALE_AFTER:
+        if gap > stale_after(name):
             parts.append(f"{name}={gap_min}m!")
             notify(stale_msg.format(m=gap_min))
             failed = True
         else:
             parts.append(f"{name}={gap_min}m")
-    # e.g. "OK signals=3m trades=0m" or "FAIL signals=3m trades=42m!"
+    # e.g. "OK signals=3m trades=0m backfill=4m" or "FAIL signals=3m trades=0m backfill=160m!"
     line = log("FAIL" if failed else "OK", " ".join(parts))
     ping_healthcheck(not failed, line)
 

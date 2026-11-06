@@ -339,53 +339,75 @@ async def load_condition_ids_for_backfill(pool, exclude_asset_ids=(), min_liq=10
     return [r["condition_id"] for r in rows]
 
 DATA_API_URL = "https://data-api.polymarket.com"
-BACKFILL_PAGE_SIZE = 500
-BACKFILL_REQUEST_GAP_SEC = 0.5  # the Data API returns 429 after a few rapid requests
+# Data API v2 (v1's /trades was retired on 2026-11-02 and answers HTTP 410).
+# Spec: https://data-api.polymarket.com/v2/openapi.json. For a market feed:
+#   - condition=<ids>: up to 20 condition ids per request, one newest-first feed;
+#   - no time filter (start/end are honoured only for a single wallet), so we
+#     page back until a page's oldest trade is older than the window start;
+#   - cursor-only paging (next_cursor until null); the same filters must be
+#     re-sent with every cursor; limit is at most 1000;
+#   - snake_case fields (token_id, transaction_hash, outcome_index); size in shares;
+#   - 300 requests / 10 s for /v2/trades; 429 (rate) and 503 (server busy) carry
+#     Retry-After.
+DATA_API_TRADES = "/v2/trades"
+DATA_API_MAX_CONDITIONS = 20
+BACKFILL_PAGE_SIZE = 1000
+BACKFILL_REQUEST_GAP_SEC = 0.2   # well under 300 req / 10 s
+DATA_API_MAX_ATTEMPTS = 4
 
 def _trade_key(t):
-    return (t.get("transactionHash"), t.get("asset"), t.get("timestamp"), str(t.get("size")))
+    return (t.get("transaction_hash"), t.get("token_id"), t.get("timestamp"), str(t.get("size")))
 
-async def fetch_public_trades(client, condition_id, cutoff_unix, end_unix=None, page_size=BACKFILL_PAGE_SIZE):
-    """
-    Public trades for one market with timestamp in [cutoff_unix, end_unix]
-    (epoch seconds; end defaults to now), newest first.
+def condition_batches(condition_ids, size=DATA_API_MAX_CONDITIONS):
+    """Split condition ids into groups the v2 API accepts in one request."""
+    return [condition_ids[i:i + size] for i in range(0, len(condition_ids), size)]
 
-    Pages by moving the Data API's `end` filter back to the oldest trade seen,
-    always at offset 0: the API rejects offsets above 10,000 ("max historical
-    trades offset of 10000 exceeded"), and busy markets pass that within a few
-    hours (10,518 trades in 3h on one market, 2026-10-31). Trades on the
-    boundary second come back twice and are dropped by key.
+async def _get_trades_page(client, params):
+    """One /v2/trades page: (trades, next_cursor). Waits out 429/503 using
+    Retry-After (else 5, 10, 15 s), then raises on any other error."""
+    for attempt in range(DATA_API_MAX_ATTEMPTS):
+        resp = await client.get(DATA_API_TRADES, params=params)
+        if resp.status_code not in (429, 503) or attempt == DATA_API_MAX_ATTEMPTS - 1:
+            break
+        try:
+            wait = float(resp.headers.get("Retry-After", ""))
+        except ValueError:
+            wait = 5.0 * (attempt + 1)
+        await asyncio.sleep(min(max(wait, 1.0), 60.0))
+    resp.raise_for_status()
+    body = resp.json()
+    return body.get("data") or [], (body.get("pagination") or {}).get("next_cursor")
+
+async def fetch_public_trades(client, condition_ids, cutoff_unix, end_unix=None, page_size=BACKFILL_PAGE_SIZE):
     """
-    end = end_unix if end_unix is not None else int(datetime.now(timezone.utc).timestamp())
-    trades, seen = [], set()
+    Public trades for up to 20 markets (condition ids; one id as a string is
+    fine) with timestamp in [cutoff_unix, end_unix] (epoch seconds; end
+    defaults to no upper bound). The feed is newest first, so paging stops at
+    the first page whose oldest trade is before cutoff_unix, or when the
+    cursor runs out. Duplicates (by transaction hash, token, time and size)
+    are dropped.
+    """
+    if isinstance(condition_ids, str):
+        condition_ids = [condition_ids]
+    if not condition_ids:
+        return []
+    if len(condition_ids) > DATA_API_MAX_CONDITIONS:
+        raise ValueError(f"at most {DATA_API_MAX_CONDITIONS} condition ids per request, got {len(condition_ids)}")
+    filters = {"condition": ",".join(condition_ids), "limit": page_size}
+    trades, seen, cursor = [], set(), None
     while True:
-        for attempt in range(3):
-            resp = await client.get("/trades", params={
-                "market": condition_id, "limit": page_size, "offset": 0,
-                "start": cutoff_unix, "end": end,
-            })
-            if resp.status_code != 429:
-                break
-            await asyncio.sleep(5 * (attempt + 1))
-        resp.raise_for_status()
-        page = resp.json()
+        params = filters if cursor is None else {**filters, "cursor": cursor}
+        page, cursor = await _get_trades_page(client, params)
         await asyncio.sleep(BACKFILL_REQUEST_GAP_SEC)
-
-        new = [t for t in page if _trade_key(t) not in seen and t.get("timestamp", 0) >= cutoff_unix]
-        seen.update(_trade_key(t) for t in new)
-        trades.extend(new)
-        if len(page) < page_size:
-            return trades
-        oldest = page[-1].get("timestamp", 0)
-        if new and oldest < end:
-            end = oldest  # normal case: the next page ends at the oldest second seen
-        else:
-            # A full page within one second: the cursor can't advance, so step
-            # past it. Only the rest of that one second is skipped.
-            logger.warning("Backfill %s: more than %d trades at %s; rest of that second skipped",
-                           condition_id, page_size, oldest)
-            end = oldest - 1
-        if end < cutoff_unix:
+        for t in page:
+            ts = t.get("timestamp", 0)
+            if ts < cutoff_unix or (end_unix is not None and ts > end_unix):
+                continue
+            key = _trade_key(t)
+            if key not in seen:
+                seen.add(key)
+                trades.append(t)
+        if not page or not cursor or page[-1].get("timestamp", 0) < cutoff_unix:
             return trades
 
 async def queue_public_trades(writer, trades, asset_maps):
@@ -393,23 +415,48 @@ async def queue_public_trades(writer, trades, asset_maps):
     how many were queued (trades for tokens we don't know are skipped)."""
     queued = 0
     for trade in trades:
-        info = asset_maps.get(trade.get("asset"))
+        asset = trade.get("token_id") or trade.get("asset")   # v2, else v1 name
+        info = asset_maps.get(asset)
         if info is None:
             continue
         raw_price = float(trade.get("price", 0))
         price, side = to_yes_terms(raw_price, trade.get("side"), info[1])
         ts = datetime.fromtimestamp(trade["timestamp"], tz=timezone.utc)
         norm = {
-            "kind": "trade", "market_id": info[0], "asset_id": trade.get("asset"),
+            "kind": "trade", "market_id": info[0], "asset_id": asset,
             "ts": ts.isoformat(), "match_time": ts.isoformat(), "price": price,
             # Data API size is in shares; the raw token price is USD per share
             "size_usd": float(trade.get("size", 0)) * raw_price,
-            "side": side, "tx_hash": trade.get("transactionHash"), "raw": trade,
+            "side": side, "tx_hash": trade.get("transaction_hash") or trade.get("transactionHash"), "raw": trade,
             "ingest_ts": datetime.now(timezone.utc).isoformat(),
         }
         await writer.add_item(norm)
         queued += 1
     return queued
+
+# Runs in a row in which every Data API request failed (reset by any run that
+# got through). Logged with each failed run so a broken API is obvious in the
+# logs; the heartbeat's "backfill" check alerts on the missing trades.
+backfill_failed_runs = 0
+
+
+def summarize_backfill(queued, n_markets, n_requests, failed, first_error):
+    """Log one line per periodic backfill run, at a level that matches what
+    happened, and keep the count of fully failed runs in a row."""
+    global backfill_failed_runs
+    if n_requests and failed == n_requests:
+        backfill_failed_runs += 1
+        logger.error("Backfill run FAILED: all %d Data API requests failed for %d markets "
+                     "(%d failed runs in a row); first error: %s",
+                     n_requests, n_markets, backfill_failed_runs, first_error)
+        return
+    backfill_failed_runs = 0
+    if failed:
+        logger.warning("Backfill queued %d trades from %d markets; %d of %d Data API requests failed",
+                       queued, n_markets, failed, n_requests)
+    else:
+        logger.info("Backfill queued %d trades from %d markets (%d requests)", queued, n_markets, n_requests)
+
 
 async def run_backfill(pool, writer, hours_back=1):
     """
@@ -424,15 +471,19 @@ async def run_backfill(pool, writer, hours_back=1):
     ws_asset_ids = await load_asset_ids(pool)
     conds = await load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_asset_ids)
 
-    queued = 0
+    queued = failed = 0
+    first_error = None
+    batches = condition_batches(conds)
     async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
-        for cond in conds:
+        for batch in batches:
             try:
                 queued += await queue_public_trades(
-                    writer, await fetch_public_trades(client, cond, cutoff_unix), asset_maps)
+                    writer, await fetch_public_trades(client, batch, cutoff_unix), asset_maps)
             except Exception as e:
-                logger.error(f"Backfill error for {cond}: {e}")
-    logger.info("Backfill queued %d trades from %d markets", queued, len(conds))
+                failed += 1
+                first_error = first_error or f"{type(e).__name__}: {e}"
+                logger.error("Backfill error for %d markets (first %s): %s", len(batch), batch[0], e)
+    summarize_backfill(queued, len(conds), len(batches), failed, first_error)
             
 async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
     """Periodically triggers the backfill process in the background."""
@@ -450,7 +501,7 @@ async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
 # --- Startup gap backfill (ROADMAP phase 2) ---
 GAP_BACKFILL_CAP = timedelta(hours=48)   # never fetch more than this after an outage
 GAP_OVERLAP = timedelta(minutes=5)       # re-fetch a little before the newest stored trade
-GAP_PAGE_SIZE = 1000                     # the Data API accepts up to 10,000
+GAP_PAGE_SIZE = 1000                     # the v2 maximum
 GAP_FLUSH_WAIT_SEC = 300                 # how long to wait for the writer to drain the queue
 
 def compute_gap_window(newest_trade_ts, now, cap=GAP_BACKFILL_CAP, overlap=GAP_OVERLAP):
@@ -516,15 +567,19 @@ async def run_gap_backfill(pool, writer, newest_trade_ts):
         start_unix, end_unix = int(start.timestamp()), int(now.timestamp())
         queued = failed = 0
         async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=30.0) as client:
-            for cond in conds:
+            for batch in condition_batches(conds):
                 try:
-                    trades = await fetch_public_trades(client, cond, start_unix, end_unix=end_unix,
+                    trades = await fetch_public_trades(client, batch, start_unix, end_unix=end_unix,
                                                        page_size=GAP_PAGE_SIZE)
                     queued += await queue_public_trades(writer, trades, asset_maps)
                 except Exception as e:
-                    failed += 1
-                    logger.error(f"Gap backfill error for {cond}: {e}")
-        logger.info("Gap backfill queued %d trades from %d markets (%d failed)", queued, len(conds), failed)
+                    failed += len(batch)
+                    logger.error("Gap backfill error for %d markets (first %s): %s", len(batch), batch[0], e)
+        if conds and failed == len(conds):
+            logger.error("Gap backfill FAILED: every Data API request failed (%d markets); "
+                         "the gap since %s is not recovered", len(conds), start)
+        else:
+            logger.info("Gap backfill queued %d trades from %d markets (%d failed)", queued, len(conds), failed)
 
         if not await wait_for_writer_drain(writer):
             logger.error("Gap backfill: writer queue did not drain in %ss; bars for the gap not rebuilt",

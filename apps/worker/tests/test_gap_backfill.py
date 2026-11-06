@@ -1,9 +1,12 @@
 """
 Tests for the startup gap backfill (ROADMAP phase 2, item 1).
 
-Read-only: uses the live Data API and the database through a read-only
+Read-only: uses the live Data API v2 and the database through a read-only
 session (DATABASE_URL must be a read-only role, e.g. zleek_web). Nothing is
 written: the writer is a fake, and the bars rebuild is captured, not run.
+Live markets come from v2's global trade feed (not the database), so this
+runs against any database that has a markets table. The offline v2 client
+tests are in test_data_api_v2.py.
 
     cd apps/worker && DATABASE_URL=... .venv/bin/python tests/test_gap_backfill.py
 """
@@ -39,56 +42,43 @@ def test_compute_gap_window():
     print("ok  compute_gap_window: fresh DB, short gap, capped gap, edge")
 
 
-async def test_time_cursor_paging(normal_conds, busy_cond):
-    """fetch_public_trades pages by moving `end` back (offset stays 0)."""
+async def test_v2_paging_live(conds):
+    """Live, read-only: v2 cursor paging returns the same trades whatever the
+    page size, has no duplicates, stays inside the window, and a batch of
+    markets in one request returns the union of the markets fetched alone.
+    Comparisons stop SETTLE_SEC before the window end: the Data API shows a
+    trade only some time after its timestamp (observed up to ~80 s on
+    2026-11-06), so calls a few seconds apart can differ in the newest
+    minute. The periodic backfill re-reads the last hour every 5 minutes, so
+    late-appearing trades are picked up on the next run."""
+    SETTLE_SEC = 300
     now = datetime.now(UTC)
-    start_unix, end_unix = int((now - timedelta(hours=3)).timestamp()), int(now.timestamp())
+    start_unix, end_unix = int((now - timedelta(hours=1)).timestamp()), int(now.timestamp())
     key = w._trade_key
     async with httpx.AsyncClient(base_url=w.DATA_API_URL, timeout=60.0) as client:
-        # (a) markets under the 10,000 cap: 100-per-page cursor == one big request
-        for cond in normal_conds:
-            paged = await w.fetch_public_trades(client, cond, start_unix, end_unix=end_unix, page_size=100)
-            one = (await client.get("/trades", params={"market": cond, "limit": 10000, "offset": 0,
-                                                       "start": start_unix, "end": end_unix})).json()
-            await asyncio.sleep(1)
-            assert len(one) < 10000, "pick a quieter market for this check"
-            assert sorted(map(key, paged)) == sorted(map(key, one)), f"{cond}: {len(paged)} vs {len(one)}"
-            print(f"ok  cursor paging == single request: {cond[:12]}... {len(paged)} trades, "
-                  f"{max(1, -(-len(paged) // 100))} page(s) of 100")
-        # (b) the busiest market: more than the 10,000 offset cap, no duplicates, reaches the window start
-        busy = await w.fetch_public_trades(client, busy_cond, start_unix, end_unix=end_unix, page_size=1000)
-        assert len({key(t) for t in busy}) == len(busy), "duplicate trades"
-        assert all(start_unix <= t["timestamp"] <= end_unix for t in busy)
-        oldest = min(t["timestamp"] for t in busy)
-        print(f"ok  busiest market {busy_cond[:12]}...: {len(busy)} trades in 3h "
-              f"({'over' if len(busy) > 10000 else 'under'} the 10,000 offset cap), no duplicates, "
-              f"oldest {oldest - start_unix}s after the window start")
+        small = await w.fetch_public_trades(client, conds[0], start_unix, end_unix=end_unix, page_size=50)
+        big = await w.fetch_public_trades(client, conds[0], start_unix, end_unix=end_unix, page_size=1000)
+        assert small, f"{conds[0]}: no trades in the last hour; pick a busier market"
+        cut = end_unix - SETTLE_SEC
+        assert sorted(key(t) for t in small if t["timestamp"] <= cut) == \
+               sorted(key(t) for t in big if t["timestamp"] <= cut), \
+            f"{conds[0]}: {len(small)} vs {len(big)}"
+        assert len({key(t) for t in big}) == len(big), "duplicate trades"
+        assert all(start_unix <= t["timestamp"] <= end_unix for t in big)
+        print(f"ok  v2 paging: {conds[0][:12]}... {len(small)} trades in 1h, pages of 50 == pages of 1000, "
+              f"no duplicates, all inside the window")
 
-
-async def test_stuck_second_terminates():
-    """(c) a full page inside one second must not loop forever."""
-    class FakeResp:
-        status_code = 200
-        def __init__(self, data): self._d = data
-        def raise_for_status(self): pass
-        def json(self): return self._d
-    class FakeClient:
-        calls = 0
-        async def get(self, path, params):
-            FakeClient.calls += 1
-            end = params["end"]
-            if end >= 1000:  # every page: 5 trades, all at second 1000
-                return FakeResp([{"transactionHash": f"0x{i}", "asset": "a", "timestamp": 1000, "size": 1}
-                                 for i in range(5)])
-            return FakeResp([{"transactionHash": "0xold", "asset": "a", "timestamp": 990, "size": 1}])
-    orig = w.BACKFILL_REQUEST_GAP_SEC
-    w.BACKFILL_REQUEST_GAP_SEC = 0
-    try:
-        got = await w.fetch_public_trades(FakeClient(), "c", 900, end_unix=1000, page_size=5)
-    finally:
-        w.BACKFILL_REQUEST_GAP_SEC = orig
-    assert FakeClient.calls == 2 and {t["timestamp"] for t in got} == {1000, 990}, (FakeClient.calls, got)
-    print("ok  full page inside one second: steps past it and terminates (2 requests)")
+        alone = []
+        for c in conds[:3]:
+            alone += await w.fetch_public_trades(client, c, start_unix, end_unix=end_unix)
+        together = await w.fetch_public_trades(client, conds[:3], start_unix, end_unix=end_unix)
+        a = {key(t) for t in alone if t["timestamp"] <= cut}
+        b = {key(t) for t in together if t["timestamp"] <= cut}
+        assert a == b, f"batch of 3 differs from one at a time: {len(a)} vs {len(b)}"
+        late = len({key(t) for t in together} - {key(t) for t in alone})
+        assert {key(t) for t in alone} <= {key(t) for t in together}, "batch lost trades a single fetch found"
+        print(f"ok  v2 batching: 3 markets in one request == one at a time ({len(b)} settled trades; "
+              f"{late} newer trades seen only by the later batched call)")
 
 
 class FakeRedis:
@@ -158,23 +148,30 @@ async def _one(conds):
     return conds[:1]
 
 
+async def live_conditions(pool, n=4):
+    """Markets trading right now, from v2's global feed, that are also in the
+    markets table (so queue_public_trades can map their tokens)."""
+    async with httpx.AsyncClient(base_url=w.DATA_API_URL, timeout=60.0) as client:
+        feed = (await client.get("/v2/trades", params={"limit": 1000})).json()["data"]
+    counts = {}
+    for t in feed:
+        counts[t["condition_id"]] = counts.get(t["condition_id"], 0) + 1
+    busiest = sorted(counts, key=counts.get, reverse=True)
+    async with pool.acquire() as conn:
+        known = {r["condition_id"] for r in await conn.fetch(
+            "SELECT condition_id FROM markets WHERE condition_id = ANY($1::text[])", busiest)}
+    return [c for c in busiest if c in known][:n]
+
+
 async def main():
     test_compute_gap_window()
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=2,
                                      server_settings={"default_transaction_read_only": "on"})
     try:
-        ws_assets = await w.load_asset_ids(pool)
-        async with pool.acquire() as conn:
-            ws_conds = [r["condition_id"] for r in await conn.fetch(
-                "SELECT condition_id FROM markets WHERE token_yes_id = ANY($1::text[]) LIMIT 1", ws_assets)]
-        conds = (await w.load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_assets, limit=2))
-        async with pool.acquire() as conn:  # busiest markets, so paging spans several pages
-            busy = [r["condition_id"] for r in await conn.fetch("""
-                SELECT m.condition_id FROM trades t JOIN markets m ON m.id = t.market_id
-                WHERE t.ts > now() - interval '3 hours' GROUP BY 1 ORDER BY count(*) DESC LIMIT 2""")]
-        await test_stuck_second_terminates()
-        await test_time_cursor_paging(conds + ws_conds, busy[0])
-        await test_run_gap_backfill(pool, conds, ws_conds)
+        conds = await live_conditions(pool)
+        assert len(conds) >= 3, f"need 3 live markets that are also in the markets table, got {conds}"
+        await test_v2_paging_live(conds)
+        await test_run_gap_backfill(pool, conds[:2], conds[2:3])
     finally:
         await pool.close()
     print("all gap backfill tests passed")
