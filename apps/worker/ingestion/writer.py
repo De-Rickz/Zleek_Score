@@ -107,8 +107,14 @@ class EliteZleekWriter:
                                maker_wallet, taker_wallet, tx_hash, raw, status,
                                market_order_id, match_time)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            ON CONFLICT (tx_hash) DO UPDATE SET price=EXCLUDED.price;
+            ON CONFLICT (tx_hash) DO UPDATE SET price=EXCLUDED.price
+            WHERE trades.price IS DISTINCT FROM EXCLUDED.price;
         """
+        # The WHERE (ROADMAP phase 4 step 2a): the periodic backfill re-fetches
+        # the last hour every 5 minutes, so each trade arrives ~12 times. An
+        # unconditional DO UPDATE writes a new row version every time, even
+        # with the same price (dead rows, WAL, autovacuum); with the WHERE,
+        # Postgres skips the write unless the price actually changed.
         
         self.WS_QUERY = """
             INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side, raw)
