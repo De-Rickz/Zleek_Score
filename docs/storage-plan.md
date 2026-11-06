@@ -111,7 +111,7 @@ the storage step keeps backups small too.
 
 ## Phase 4 storage step (before the websocket cap raise)
 
-See ROADMAP.md, phase 4 step 4. Details:
+See ROADMAP.md, phase 4 step 3 (after steps 2a and 2, which multiply stored trades). Details:
 
 **Compression** for chunks older than the backfill's reach: compress after
 3 days (the startup gap backfill reaches back up to 48 h, plus a day of
