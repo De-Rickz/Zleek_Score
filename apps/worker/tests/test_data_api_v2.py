@@ -175,6 +175,104 @@ def test_queue_maps_v2_fields():
     assert a["raw"] is yes                                                   # raw stores the v2 object
 
 
+def _run_backfill_with(client_factory, n_markets=45):
+    """run_backfill with the database lookups and the HTTP client faked;
+    returns the log records it wrote."""
+    import logging
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    conds = [f"0xc{i:02d}" for i in range(n_markets)]
+
+    async def asset_maps(pool):
+        return {t["token_id"]: ("m", "YES") for t in ALL}
+
+    async def asset_ids(pool):
+        return []
+
+    async def condition_ids(pool, **kw):
+        return conds
+
+    saved = (w.load_asset_maps, w.load_asset_ids, w.load_condition_ids_for_backfill, w.httpx.AsyncClient, w.asyncio.sleep)
+    handler = Grab()
+    w.logger.addHandler(handler)
+    old_level = w.logger.level
+    w.logger.setLevel(logging.DEBUG)   # INFO summaries too (no logging config in tests)
+
+    class Writer:
+        async def add_item(self, item): pass
+
+    async def no_sleep(sec): pass
+    w.load_asset_maps, w.load_asset_ids, w.load_condition_ids_for_backfill = asset_maps, asset_ids, condition_ids
+    w.httpx.AsyncClient, w.asyncio.sleep = client_factory, no_sleep
+    try:
+        run(w.run_backfill(None, Writer()))
+    finally:
+        (w.load_asset_maps, w.load_asset_ids, w.load_condition_ids_for_backfill,
+         w.httpx.AsyncClient, w.asyncio.sleep) = saved
+        w.logger.removeHandler(handler)
+        w.logger.setLevel(old_level)
+    return records
+
+
+class _CtxClient(FakeClient):
+    def __init__(self, *a, **kw):
+        super().__init__()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _AlwaysGone(_CtxClient):
+    async def get(self, path, params):
+        self.calls.append((path, dict(params)))
+        return FakeResp(410, {"error": "Data API v1 has been retired"})
+
+
+def test_backfill_run_all_failed_is_an_error_and_counted():
+    w.backfill_failed_runs = 0
+    recs = _run_backfill_with(_AlwaysGone)
+    summary = [r for r in recs if "Backfill run FAILED" in r.getMessage()]
+    assert len(summary) == 1 and summary[0].levelname == "ERROR", [r.getMessage() for r in recs]
+    msg = summary[0].getMessage()
+    assert "all 3 Data API requests failed for 45 markets" in msg and "(1 failed runs in a row)" in msg, msg
+    assert "410" in msg, msg
+    assert sum(1 for r in recs if r.levelname == "ERROR" and "Backfill error for" in r.getMessage()) == 3
+    recs = _run_backfill_with(_AlwaysGone)                         # a second failed run in a row
+    assert any("(2 failed runs in a row)" in r.getMessage() for r in recs)
+    assert w.backfill_failed_runs == 2
+
+
+def test_backfill_run_success_resets_the_count():
+    w.backfill_failed_runs = 5
+    recs = _run_backfill_with(_CtxClient, n_markets=10)            # serves the recorded pages
+    assert w.backfill_failed_runs == 0
+    info = [r for r in recs if r.getMessage().startswith("Backfill queued")]
+    assert len(info) == 1 and info[0].levelname == "INFO", [r.getMessage() for r in recs]
+
+
+def test_backfill_run_partial_failure_is_a_warning():
+    class FailSecond(_CtxClient):
+        n = 0
+        async def get(self, path, params):
+            if "cursor" not in params:
+                FailSecond.n += 1
+                if FailSecond.n == 2:
+                    return FakeResp(500, {})
+            return await super().get(path, params)
+    w.backfill_failed_runs = 3
+    recs = _run_backfill_with(FailSecond, n_markets=45)             # 3 batches, the 2nd fails
+    warn = [r for r in recs if r.levelname == "WARNING" and r.getMessage().startswith("Backfill queued")]
+    assert len(warn) == 1 and "1 of 3 Data API requests failed" in warn[0].getMessage(), [r.getMessage() for r in recs]
+    assert w.backfill_failed_runs == 0
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

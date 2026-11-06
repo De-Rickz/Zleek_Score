@@ -434,6 +434,30 @@ async def queue_public_trades(writer, trades, asset_maps):
         queued += 1
     return queued
 
+# Runs in a row in which every Data API request failed (reset by any run that
+# got through). Logged with each failed run so a broken API is obvious in the
+# logs; the heartbeat's "backfill" check alerts on the missing trades.
+backfill_failed_runs = 0
+
+
+def summarize_backfill(queued, n_markets, n_requests, failed, first_error):
+    """Log one line per periodic backfill run, at a level that matches what
+    happened, and keep the count of fully failed runs in a row."""
+    global backfill_failed_runs
+    if n_requests and failed == n_requests:
+        backfill_failed_runs += 1
+        logger.error("Backfill run FAILED: all %d Data API requests failed for %d markets "
+                     "(%d failed runs in a row); first error: %s",
+                     n_requests, n_markets, backfill_failed_runs, first_error)
+        return
+    backfill_failed_runs = 0
+    if failed:
+        logger.warning("Backfill queued %d trades from %d markets; %d of %d Data API requests failed",
+                       queued, n_markets, failed, n_requests)
+    else:
+        logger.info("Backfill queued %d trades from %d markets (%d requests)", queued, n_markets, n_requests)
+
+
 async def run_backfill(pool, writer, hours_back=1):
     """
     🔄 The Producer: Fills the Redis buffer with recent public trades from the
@@ -447,15 +471,19 @@ async def run_backfill(pool, writer, hours_back=1):
     ws_asset_ids = await load_asset_ids(pool)
     conds = await load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_asset_ids)
 
-    queued = 0
+    queued = failed = 0
+    first_error = None
+    batches = condition_batches(conds)
     async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
-        for batch in condition_batches(conds):
+        for batch in batches:
             try:
                 queued += await queue_public_trades(
                     writer, await fetch_public_trades(client, batch, cutoff_unix), asset_maps)
             except Exception as e:
+                failed += 1
+                first_error = first_error or f"{type(e).__name__}: {e}"
                 logger.error("Backfill error for %d markets (first %s): %s", len(batch), batch[0], e)
-    logger.info("Backfill queued %d trades from %d markets", queued, len(conds))
+    summarize_backfill(queued, len(conds), len(batches), failed, first_error)
             
 async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
     """Periodically triggers the backfill process in the background."""
@@ -547,7 +575,11 @@ async def run_gap_backfill(pool, writer, newest_trade_ts):
                 except Exception as e:
                     failed += len(batch)
                     logger.error("Gap backfill error for %d markets (first %s): %s", len(batch), batch[0], e)
-        logger.info("Gap backfill queued %d trades from %d markets (%d failed)", queued, len(conds), failed)
+        if conds and failed == len(conds):
+            logger.error("Gap backfill FAILED: every Data API request failed (%d markets); "
+                         "the gap since %s is not recovered", len(conds), start)
+        else:
+            logger.info("Gap backfill queued %d trades from %d markets (%d failed)", queued, len(conds), failed)
 
         if not await wait_for_writer_drain(writer):
             logger.error("Gap backfill: writer queue did not drain in %ss; bars for the gap not rebuilt",
