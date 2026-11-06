@@ -33,6 +33,8 @@ create table if not exists trades(
   match_time timestamptz
 );
 create index if not exists ix_trades_mkt_ts on trades(market_id, ts);
+-- time-only queries across all markets (bars job, gap backfill): phase 4 step 1
+create index if not exists ix_trades_ts on trades(ts);
 
 -- 3) Orderbook snapshots (top-10 depth every N seconds)
 create table if not exists ob_snapshots(

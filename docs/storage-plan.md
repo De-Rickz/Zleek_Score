@@ -4,7 +4,7 @@ Written 2026-11-04 during the soak. Nothing here changes the worker or the
 database settings until phase 4 starts (ROADMAP: no earlier than 2026-11-06).
 The scripts below are host-level and read-only towards the database.
 
-## Where we are (2026-11-04)
+## Where we were (2026-11-04)
 
 - Database 592 MB after ~2.5 days on production; disk 12 GB used of 45 GB
   (after pruning 5.7 GB of docker build cache).
@@ -48,27 +48,41 @@ cd ~/zleek && docker compose -f docker-compose.prod.yml exec -T \
   db psql -U zleek_web -d postgres -X < apps/worker/scripts/storage-report.sql
 ```
 
-## Growth and runway (provisional, replace with Friday's report)
+## Growth and runway (measured 2026-11-06)
 
-Inputs: production's rows per day from the 2026-11-03 funnel window (trades
-54,035; ob_snapshots 27,788; features_5m 72,928; signals_history 72,909;
-bars_1m 12,440) times the bytes per row above. Scaling with the websocket cap:
-by 24h volume the top 100 markets trade 2.8x the top 20 and the top 200 3.95x;
-trades, book snapshots and bars are scaled by that; features and
-signals_history depend on the scored markets, not the cap, so they stay flat.
+From production's storage report on 2026-11-06 14:55 UTC (database 790 MB,
+disk 13 GB of 45 GB, 30%): rows per day averaged over the complete days
+Tue 11-03 to Thu 11-05, times production's own bytes per row on disk.
+
+| table | rows/day | on disk / row | per day at cap 20 |
+|---|---|---|---|
+| trades | 74,300 (63k, 68k, 92k: rising) | 992 B | 74 MB |
+| ob_snapshots | 29,500 | 2,014 B | 59 MB |
+| features_5m | 58,500 (falling as markets end) | 111 B | 6.5 MB |
+| signals_history | 58,400 | 108 B | 6.3 MB |
+| bars_1m | 10,400 | 288 B | 3 MB |
+| **sum** | | | **~149 MB** |
+
+Cross-check: the tables other than `markets` hold 652 MB after 4.7 days on
+production, ~138 MB/day. Raw JSON is 60% of a trade row and the book levels
+91% of a snapshot, as on the Mac. `markets` is 138 MB for ~8,500 markets
+(~16 KB each: full Gamma payloads, plus dead row versions from rewriting them
+on every refresh); whether it keeps growing or plateaus shows in the next
+reports. The week includes the US midterms (Tue 11-03), so trades are likely
+busier than usual: a safe basis for planning.
+
+Scaling with the websocket cap: by 24h volume the top 100 markets trade 2.8x
+the top 20 and the top 200 3.95x; trades, book snapshots and bars scale by
+that; features and signals_history depend on the scored markets, not the cap.
 
 | per day | cap 20 (now) | cap 100 | cap 200 |
 |---|---|---|---|
-| trades | 64 MB | 179 MB | 253 MB |
-| ob_snapshots | 55 MB | 154 MB | 217 MB |
-| features_5m | 10 MB | 10 MB | 10 MB |
-| signals_history | 8 MB | 8 MB | 8 MB |
-| bars_1m | 4 MB | 11 MB | 15 MB |
-| **sum of tables** | **141 MB** | **362 MB** | **503 MB** |
-
-The measured total (592 MB / 2.5 days = 237 MB/day) is higher than the 141 MB
-table sum: the first load of `markets` (Gamma payloads, rewritten on every
-refresh) and index growth. The daily report shows how much of that repeats.
+| trades | 74 MB | 207 MB | 292 MB |
+| ob_snapshots | 59 MB | 166 MB | 233 MB |
+| features_5m | 6.5 MB | 6.5 MB | 6.5 MB |
+| signals_history | 6.3 MB | 6.3 MB | 6.3 MB |
+| bars_1m | 3 MB | 8.4 MB | 12 MB |
+| **sum** | **~149 MB** | **~394 MB** | **~550 MB** |
 
 **With the phase 4 storage step** (assumptions: TimescaleDB compression 4x,
 conservative for this kind of data; books at top 10 levels a side, about 1.8x
@@ -76,22 +90,24 @@ smaller per snapshot; retention below): long-run growth is mostly compressed
 trades and bars, plus fixed-size plateaus for the tables with retention
 (~0.9 GB at cap 100, ~1.2 GB at cap 200).
 
-Runway to the 75% disk warning (33.75 GB of 45 GB; 21.75 GB free above today's
-12 GB, assuming the rest of the disk stays flat):
+Runway to the 75% disk warning (33.75 GB of 45 GB; 20.75 GB free above the
+13 GB used on 2026-11-06, assuming the rest of the disk stays flat):
 
 | | growth / day | days to 75% |
 |---|---|---|
-| cap 20, as now (measured 237 MB/day) | 237 MB | ~92 |
-| cap 100, no compression or retention | 362 MB | ~60 |
-| cap 100, with the storage step | ~48 MB + 0.9 GB plateau | ~430 (14 months) |
-| cap 200, no compression or retention | 503 MB | ~43 |
-| cap 200, with the storage step | ~67 MB + 1.2 GB plateau | ~310 (10 months) |
+| cap 20, as now | ~149 MB | ~139 |
+| cap 100, no compression or retention | ~394 MB | ~53 |
+| cap 100, with the storage step | ~54 MB + 0.9 GB plateau | ~370 (12 months) |
+| cap 200, no compression or retention | ~550 MB | ~38 |
+| cap 200, with the storage step | ~76 MB + 1.2 GB plateau | ~260 (8.5 months) |
 
-Backups grow with the database: dumps are ~9% of it, 7 are kept on the same
-disk and 30 in the bucket (20 GB free tier). At cap 200 without compression,
-the database would pass ~20 GB within ~40 days: dumps of ~1.8 GB, 12.6 GB of
-local dumps on the same disk, and the bucket over its free tier. Compressed
-chunks dump compressed, so the storage step keeps backups small too.
+Backups grow with the database: the nightly dump went 54 -> 73 -> 92 MB on
+11-04 to 11-06 (~19 MB/day, ~12% of the database), 7 kept on the same disk and
+30 in the bucket (20 GB free tier). At cap 200 without compression the
+database would pass ~20 GB within ~40 days: dumps of ~2.5 GB, ~17 GB of local
+dumps on the same disk (so the real runway is shorter than the table says),
+and the bucket far over its free tier. Compressed chunks dump compressed, so
+the storage step keeps backups small too.
 
 ## Phase 4 storage step (before the websocket cap raise)
 
