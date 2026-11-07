@@ -204,6 +204,46 @@ def split_new(items, existing):
     return new, already
 
 
+NEAR_SEC = 300   # a missing trade this close to a stored one of the same market counts as "near"
+
+
+def classify_missing(new, stored_ts):
+    """Split NEW (missing) trades by whether the market was being followed at
+    that moment. stored_ts: market_id -> sorted epoch seconds of its stored
+    trades in the window. Returns counts:
+      near_stored     a stored trade of the same market within NEAR_SEC: the
+                      market was being followed, so the trade was dropped
+                      (the case that would mean a real ingestion fault)
+      not_followed    no stored trade within NEAR_SEC: the market was outside
+                      the websocket and backfill selections at the time
+                      (selection rotation, late entry)
+      never_stored    the market has no stored trade in the window at all
+    (2026-11-07, Mac data for market 562802: every trade stored while it was on
+    the websocket, then a block of misses after it left the top 20.)
+    """
+    import bisect
+    out = {"near_stored": 0, "not_followed": 0, "never_stored": 0}
+    for e in new:
+        ts_list = stored_ts.get(e["market_id"])
+        if not ts_list:
+            out["never_stored"] += 1
+            continue
+        t = int(datetime.fromisoformat(e["ts"]).timestamp())
+        i = bisect.bisect_left(ts_list, t - NEAR_SEC)
+        near = i < len(ts_list) and ts_list[i] <= t + NEAR_SEC
+        out["near_stored" if near else "not_followed"] += 1
+    return out
+
+
+async def stored_times(conn, market_ids, start, end):
+    """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
+    rows = await conn.fetch(
+        """SELECT market_id, array_agg(extract(epoch FROM ts)::bigint ORDER BY ts) AS t FROM trades
+           WHERE market_id = ANY($1::text[]) AND ts >= $2 AND ts <= $3 GROUP BY 1""",
+        list(market_ids), start, end)
+    return {r["market_id"]: list(r["t"]) for r in rows}
+
+
 def per_day(items):
     c = collections.Counter(str(e["ts"])[:10] for e in items)
     return dict(sorted(c.items()))
@@ -281,6 +321,15 @@ async def main(args):
         for name, (fetched, unmapped, items, markets, infos) in groups.items():
             new, already = split_new(items, existing)
             report(name, fetched, unmapped, markets, new, already, infos)
+            if args.diagnose and new:
+                async with pool.acquire() as conn:
+                    times = await stored_times(conn, {e["market_id"] for e in new}, start, end)
+                print(f"   missing trades: {classify_missing(new, times)}  (near_stored = dropped while followed)")
+                by_market = collections.Counter(e["market_id"] for e in new)
+                for m, n in by_market.most_common(args.diagnose):
+                    mc = classify_missing([e for e in new if e["market_id"] == m], times)
+                    print(f"     {m:>10}: {n:>6} missing ({mc['near_stored']} near a stored trade), "
+                          f"{len(times.get(m, []))} stored in window")
             if name == "backfill" or args.include_websocket_markets:
                 incomplete += sum(1 for b in infos if not b["complete"])
             if name == "backfill" or args.include_websocket_markets:
@@ -329,6 +378,10 @@ def parse_args(argv=None):
     ap.add_argument("--include-websocket-markets", action="store_true",
                     help="with --apply, also write the websocket group's new trades")
     ap.add_argument("--sample", type=int, default=10)
+    ap.add_argument("--diagnose", type=int, default=0, metavar="N",
+                    help="read-only: split missing trades into near a stored trade of the same market "
+                         "(dropped while followed) / not followed / never stored, and list the N "
+                         "markets with the most missing")
     return ap.parse_args(argv)
 
 

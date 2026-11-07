@@ -226,6 +226,17 @@ def test_default_window_and_flags():
     assert a.apply and a.include_websocket_markets
 
 
+def test_classify_missing_near_vs_not_followed():
+    base = 1793990000                                       # stored trades at +0 and +60 s
+    stored = {"m1": [base, base + 60]}
+    iso = lambda s: r.datetime.fromtimestamp(s, r.timezone.utc).isoformat()
+    new = [{"market_id": "m1", "ts": iso(base + 30)},                    # between stored ones: dropped
+           {"market_id": "m1", "ts": iso(base + 60 + r.NEAR_SEC)},       # exactly NEAR_SEC after: near
+           {"market_id": "m1", "ts": iso(base + 60 + r.NEAR_SEC + 1)},   # just beyond: not followed
+           {"market_id": "m2", "ts": iso(base)}]                         # market never stored
+    assert r.classify_missing(new, stored) == {"near_stored": 2, "not_followed": 1, "never_stored": 1}
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
