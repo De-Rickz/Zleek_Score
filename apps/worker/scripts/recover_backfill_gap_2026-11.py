@@ -235,6 +235,21 @@ def classify_missing(new, stored_ts):
     return out
 
 
+TIMELINE_BLOCK_SEC = 600
+
+
+def timeline(missing_ts, stored_ts, block=TIMELINE_BLOCK_SEC):
+    """Per 10-minute block with any trade: (block start epoch, stored, missing).
+    A block with many of both means trades were dropped while the market was
+    followed; blocks of only missing mean it wasn't followed then."""
+    rows = collections.defaultdict(lambda: [0, 0])
+    for t in stored_ts:
+        rows[t - t % block][0] += 1
+    for t in missing_ts:
+        rows[t - t % block][1] += 1
+    return [(b, st, mi) for b, (st, mi) in sorted(rows.items())]
+
+
 async def stored_times(conn, market_ids, start, end):
     """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
     rows = await conn.fetch(
@@ -330,6 +345,10 @@ async def main(args):
                     mc = classify_missing([e for e in new if e["market_id"] == m], times)
                     print(f"     {m:>10}: {n:>6} missing ({mc['near_stored']} near a stored trade), "
                           f"{len(times.get(m, []))} stored in window")
+                    miss_ts = [int(datetime.fromisoformat(e["ts"]).timestamp()) for e in new if e["market_id"] == m]
+                    cells = [f"{datetime.fromtimestamp(b, timezone.utc):%H:%M} {st}/{mi}"
+                             for b, st, mi in timeline(miss_ts, times.get(m, []))]
+                    print("        stored/missing per 10 min: " + "  ".join(cells))
             if name == "backfill" or args.include_websocket_markets:
                 incomplete += sum(1 for b in infos if not b["complete"])
             if name == "backfill" or args.include_websocket_markets:

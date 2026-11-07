@@ -237,6 +237,13 @@ def test_classify_missing_near_vs_not_followed():
     assert r.classify_missing(new, stored) == {"near_stored": 2, "not_followed": 1, "never_stored": 1}
 
 
+def test_timeline_per_ten_minutes():
+    b = 1793990400                                          # a 10-minute boundary
+    assert b % 600 == 0
+    assert r.timeline(missing_ts=[b + 1, b + 1300], stored_ts=[b + 5, b + 599, b + 600]) == [
+        (b, 2, 1), (b + 600, 1, 0), (b + 1200, 0, 1)]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
