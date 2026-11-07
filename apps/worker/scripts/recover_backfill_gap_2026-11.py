@@ -43,11 +43,21 @@ Idempotent and safe while the worker runs: everything goes through
 ON CONFLICT (tx_hash), so a second --apply inserts 0 rows, and a run that stops
 part-way leaves committed batches in place for the next run to complete.
 
-Run on the server, in a one-off container from the worker image with the
-worker's own environment (its DATABASE_URL), without touching the running
-worker:
-  $PROD run --rm --no-deps worker python /app/scripts/recover_backfill_gap_2026-11.py
-  $PROD run --rm --no-deps worker python /app/scripts/recover_backfill_gap_2026-11.py --apply
+Run on the server (cd ~/zleek), in a one-off container from the worker image
+with the worker's own environment (its DATABASE_URL), without touching the
+running worker. The scripts folder is mounted so the checked-out script runs,
+not the copy baked into the image. Run the apply in tmux: it takes a while.
+  1. Dry run, both groups (expect "incomplete batches in the groups to write: 0"):
+       $PROD run --rm --no-deps -v "$PWD/apps/worker/scripts:/app/scripts:ro" worker \
+         python /app/scripts/recover_backfill_gap_2026-11.py --include-websocket-markets
+  2. Manual backup, with the off-site copy (expect an OK ... offsite=ok line):
+       ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily ~/bin/zleek-db-backup.sh
+       tail -1 ~/backups/zleek-db/backup.log
+  3. Apply:
+       $PROD run --rm --no-deps -v "$PWD/apps/worker/scripts:/app/scripts:ro" worker \
+         python /app/scripts/recover_backfill_gap_2026-11.py --apply --include-websocket-markets
+  4. Record trades recovered per day, and what couldn't be (markets that ended
+     during the gap, incomplete batches), in docs/parallel-run.md section 5.
 """
 import argparse
 import asyncio
