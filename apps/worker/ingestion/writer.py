@@ -448,6 +448,67 @@ async def queue_public_trades(writer, trades, asset_maps):
         queued += 1
     return queued
 
+# --- Catch-up on join (ROADMAP phase 4 step 3) ---
+# When the websocket subscribes to a market it wasn't subscribed to, the
+# market's trades from before that moment are otherwise never fetched: the
+# periodic backfill drops it once it enters the top 20, and its last run may
+# be up to 5 minutes old. So fetch the market's last hour once, a little after
+# subscribing (the Data API shows trades up to ~80 s late). The overlap with
+# what the websocket and the backfill already stored dedupes on tx_hash
+# (REST_QUERY, which skips unchanged rows).
+CATCH_UP_DELAY_SEC = 120
+CATCH_UP_LOOKBACK = timedelta(hours=1)
+
+
+async def load_condition_ids_for_assets(pool, asset_ids):
+    """Condition ids of the markets that own these token ids."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT DISTINCT condition_id FROM markets
+               WHERE condition_id IS NOT NULL
+                 AND (token_yes_id = ANY($1::text[]) OR token_no_id = ANY($1::text[]))""",
+            list(asset_ids))
+    return sorted(r["condition_id"] for r in rows)
+
+
+async def catch_up_on_join(pool, writer, asset_ids, joined_at,
+                           delay_sec=CATCH_UP_DELAY_SEC, lookback=CATCH_UP_LOOKBACK):
+    """Fetch and queue the last `lookback` (before joined_at) of trades for
+    newly subscribed tokens, after waiting delay_sec. Never raises (other than
+    cancellation): a failure is logged and the websocket is unaffected.
+    Returns how many trades were queued."""
+    try:
+        await asyncio.sleep(delay_sec)
+        conds = await load_condition_ids_for_assets(pool, asset_ids)
+        if not conds:
+            return 0
+        asset_maps = await load_asset_maps(pool)
+        cutoff_unix = int((joined_at - lookback).timestamp())
+        queued = failed = 0
+        batches = condition_batches(conds)
+        async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
+            for batch in batches:
+                try:
+                    queued += await queue_public_trades(
+                        writer, await fetch_public_trades(client, batch, cutoff_unix), asset_maps)
+                except Exception as e:
+                    failed += 1
+                    logger.warning("Catch-up on join error for %d markets (first %s): %s",
+                                   len(batch), batch[0], e)
+        if failed:
+            logger.warning("Catch-up on join queued %d trades for %d new markets; %d of %d requests failed",
+                           queued, len(conds), failed, len(batches))
+        else:
+            logger.info("Catch-up on join queued %d trades from the last %s for %d new markets",
+                        queued, lookback, len(conds))
+        return queued
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("Catch-up on join failed: %s", e)
+        return 0
+
+
 # Runs in a row in which every Data API request failed (reset by any run that
 # got through). Logged with each failed run so a broken API is obvious in the
 # logs; the heartbeat's "backfill" check alerts on the missing trades.

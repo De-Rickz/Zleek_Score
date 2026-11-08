@@ -2,7 +2,7 @@ import asyncio
 import json
 import websockets
 from websockets.exceptions import ConnectionClosed
-from writer import load_asset_maps, load_asset_ids, to_yes_terms, book_to_yes_terms
+from writer import load_asset_maps, load_asset_ids, to_yes_terms, book_to_yes_terms, catch_up_on_join, CATCH_UP_DELAY_SEC
 from datetime import datetime, timezone
 import logging
 from collections import Counter
@@ -59,6 +59,26 @@ async def heartbeat(ws):
         logger.debug("Heartbeat cancelled")
         raise
 
+# Catch-up tasks run in the background, outside the connection: a resubscribe
+# closes the socket, and that must not cancel a catch-up in progress. Keeping a
+# reference stops them being garbage-collected before they finish.
+catch_up_tasks = set()
+
+
+def newly_subscribed(followed, asset_ids):
+    """Tokens in this subscription that the previous one didn't have (all of
+    them on the first connect). A reconnect with the same set gives none."""
+    return set(asset_ids) - set(followed)
+
+
+def schedule_catch_up(pool, writer, asset_ids):
+    task = asyncio.create_task(catch_up_on_join(pool, writer, asset_ids, datetime.now(timezone.utc)),
+                               name="catch_up_on_join")
+    catch_up_tasks.add(task)
+    task.add_done_callback(catch_up_tasks.discard)
+    return task
+
+
 # 🔌 1. Signature updated to expect 'writer' instead of 'queue'
 async def subscribe(writer, pool):
     """
@@ -67,6 +87,7 @@ async def subscribe(writer, pool):
     """
     backoff = 1
     max_backoff = 60
+    followed = set()   # tokens of the last subscription sent (for catch-up on join)
     
     while True:
         changed = asyncio.Event()
@@ -96,6 +117,12 @@ async def subscribe(writer, pool):
       
                 await ws.send(json.dumps({"assets_ids": asset_ids, "type": "MARKET"}))
                 logger.info("Subscribed to %d assets", len(asset_ids))
+                joined = newly_subscribed(followed, asset_ids)
+                followed = set(asset_ids)
+                if joined:
+                    logger.info("Catch-up on join scheduled for %d new assets in %d s",
+                                len(joined), CATCH_UP_DELAY_SEC)
+                    schedule_catch_up(pool, writer, joined)
                 
                 hb = asyncio.create_task(heartbeat(ws))
                 watcher = asyncio.create_task(watch_subscription(ws, pool, set(asset_ids), changed))
