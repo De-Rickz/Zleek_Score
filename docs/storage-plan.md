@@ -164,7 +164,8 @@ cd ~/zleek && git status --short && git pull
 install -m 700 infra/ops/zleek-ntfy.sh infra/ops/zleek-disk-alert.sh \
                infra/ops/zleek-docker-prune.sh infra/backup/zleek-restore-test.sh ~/bin/
 # the helper is sourced, not run; keep it next to the scripts in ~/bin
-~/bin/zleek-disk-alert.sh && cat ~/.zleek/disk-alert.state     # expect "ok" (no push at 27%)
+~/bin/zleek-disk-alert.sh; echo "exit=$?"                       # expect exit=0, no push at 27%
+# (the state file is written only when the level changes: missing = ok)
 ~/bin/zleek-docker-prune.sh && tail -1 ~/.zleek/docker-prune.log
 ~/bin/zleek-restore-test.sh; echo "exit=$?"; tail -1 ~/backups/zleek-db/restore-test.log
 crontab -e   # add:
@@ -181,6 +182,14 @@ low threshold, then reset its state:
 ZLEEK_DISK_WARN_PCT=10 ~/bin/zleek-disk-alert.sh   # push "Warning: disk / 27% used ..."
 rm ~/.zleek/disk-alert.state                       # next normal run starts from "ok", no push
 ```
+
+Check it works: the push shows in `~/.zleek/disk-alert.log` (`ALERT warn ...`),
+and cron's runs in `grep -a zleek-disk-alert /var/log/syslog | tail -3`. An
+empty `~/.zleek/cron.log` means no errors.
+
+Installed 2026-11-04, but the three cron lines were missing until
+2026-11-08 (found before phase 4 step 2): the scripts had only run by hand.
+Added that day; test push received, cron runs every 15 minutes confirmed.
 
 The first restore-test run is the real check: if `pg_restore` reports
 TimescaleDB errors that are harmless, the script fails on them by design;
