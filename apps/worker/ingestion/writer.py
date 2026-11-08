@@ -322,20 +322,34 @@ async def load_asset_maps(pool):
         if r["token_no_id"]: m[r["token_no_id"]] = (r["market_id"], "NO")
     return m
 
-async def load_condition_ids_for_backfill(pool, exclude_asset_ids=(), min_liq=10000, limit=200):
-    # Markets already on the websocket are excluded: WS trades are stored without
-    # a tx_hash, so backfilling them too would store every trade twice.
+async def load_condition_ids_for_backfill(pool, exclude_asset_ids=(), min_liq=10000, limit=200,
+                                          fresh_within=timedelta(hours=2)):
+    # Ranked by 24h volume, with the same filters as load_asset_ids (ROADMAP
+    # phase 4 step 2): ranked by liquidity, the 200 were mostly quiet markets
+    # (on 2026-11-07 only 51 traded in 5 hours), and busy markets went
+    # unfollowed until they reached the websocket's top 20 (42.7% of the
+    # Data API's trades for these markets not stored that day). So the
+    # periodic backfill covers the markets ranked 21-220, the ones about to
+    # enter the websocket.
+    # Websocket markets are excluded only because the websocket already stores
+    # their trades; an overlap would be harmless (both paths carry tx_hash, and
+    # REST_QUERY's ON CONFLICT (tx_hash) dedupes). The gap backfill passes no
+    # exclusion and gets the top 200 including the websocket's.
     query = """
         SELECT condition_id
         FROM markets
         WHERE status = 'open' AND liquidity_usd >= $1 AND condition_id IS NOT NULL
+          AND ($4::interval IS NULL OR updated_at > now() - $4::interval)
           AND NOT (token_yes_id = ANY($3::text[]) OR token_no_id = ANY($3::text[]))
         GROUP BY condition_id
-        ORDER BY MAX(liquidity_usd) DESC
+        ORDER BY MAX((raw->>'volume24hr')::float8) DESC NULLS LAST
         LIMIT $2
     """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, min_liq, limit, list(exclude_asset_ids))
+        rows = await conn.fetch(query, min_liq, limit, list(exclude_asset_ids), fresh_within)
+        if not rows:
+            logger.warning("Backfill: no markets refreshed in the last %s; using stale rows", fresh_within)
+            rows = await conn.fetch(query, min_liq, limit, list(exclude_asset_ids), None)
     return [r["condition_id"] for r in rows]
 
 DATA_API_URL = "https://data-api.polymarket.com"
