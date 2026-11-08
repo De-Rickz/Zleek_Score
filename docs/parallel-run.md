@@ -332,6 +332,41 @@ below (run 23:40-23:50 UTC, about 50 h after the server's first start).
   in ROADMAP phase 4 step 2b: the backfill moved to Data API v2, and the
   heartbeat now has an absolute "backfill" check (a backfilled trade within
   the last 2 h), alerting through ntfy and healthchecks.io.
+- **Gap recovered (2026-11-07, ~23:30-23:55 UTC):** the one-off
+  `apps/worker/scripts/recover_backfill_gap_2026-11.py` re-fetched
+  2026-11-02 22:20 to 2026-11-06 16:05 UTC from Data API v2 for the
+  backfill selection (200 by liquidity) and the websocket's 20 markets as
+  they stood at run time, after a manual backup with its off-site copy
+  (`offsite=ok`). Dry run: 673 requests, 0 retries, 0 incomplete batches.
+  Inserted **314,969 trades** (0 stored meanwhile by the running worker),
+  and the database count of trades in the window inserted on 11-07 agrees
+  day by day:
+
+  | day (UTC) | recovered |
+  |---|---|
+  | 11-02 (from 22:20) | 6,875 |
+  | 11-03 | 120,440 |
+  | 11-04 | 113,567 |
+  | 11-05 | 51,331 |
+  | 11-06 (to 16:05) | 22,756 |
+
+  bars_1m rebuilt for the window. features_5m and signals_history were left
+  as recorded, so the scores shown during the gap stay the ones computed
+  from the incomplete trades. Worker unaffected: up 32 h (not restarted), 893 trades stored in the 10
+  minutes after; its only errors in the 30 minutes after were the known
+  Gamma 422 pagination cap (infra/TODO.md), one per 10-minute refresh.
+  **Not recovered:** markets that ended during the gap, and markets outside
+  the selection at run time (the script takes the selection when it runs;
+  it shifted between the dry run, 323,218 to write, and the apply, 314,969).
+  A dry run straight after the apply found 144 trades still missing for the
+  then-current selection (0.03% of 530,120), not chased. 0 incomplete
+  batches.
+  **Far above the ~20,000 estimate** (which assumed the gap lost only what
+  the backfill normally stores): most of these trades were lost at onset,
+  before markets were followed at all, not to the v1 retirement. The
+  websocket group alone was 222,774. See ROADMAP phase 4, "Onset loss"
+  (steps 2 and 3): in a control window after 2b, 19% of trades were still
+  lost that way, so it continues until those steps deploy.
 - **Mac:** stopped 2026-11-03 per section 7, after these checks: worker and
   heartbeat booted out (`launchctl print` reports the worker isn't found),
   `docker compose stop` (not `down -v`). Its data and plists stay for the
