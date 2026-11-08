@@ -244,6 +244,40 @@ def test_timeline_per_ten_minutes():
         (b, 2, 1), (b + 600, 1, 0), (b + 1200, 0, 1)]
 
 
+def test_onset_share():
+    c1 = {"near_stored": 5, "not_followed": 10, "never_stored": 5}
+    c2 = {"near_stored": 0, "not_followed": 0, "never_stored": 0}     # a group with nothing missing
+    total, lost, lost_pct, near, near_pct = r.onset_share([(100, c1), (100, c2)])
+    assert (total, lost, near) == (200, 15, 5) and lost_pct == 7.5 and near_pct == 2.5
+    assert r.onset_share([]) == (0, 0, 0.0, 0, 0.0)
+
+
+def test_population_volume_is_dry_run_only():
+    assert r.parse_args([]).population == "selection"
+    assert r.parse_args(["--population", "volume", "--diagnose", "5"]).population == "volume"
+    import contextlib, io
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            r.parse_args(["--population", "volume", "--apply"])
+        except SystemExit as e:
+            assert e.code == 2
+        else:
+            raise AssertionError("--population volume with --apply must be refused")
+
+
+def test_volume_condition_ids_query():
+    class Conn:
+        async def fetch(self, query, exclude, limit):
+            self.q, self.args = " ".join(query.split()), (exclude, limit)
+            return [{"condition_id": "0x1"}, {"condition_id": "0x2"}]
+    c = Conn()
+    assert run(r.volume_condition_ids(c, ["tokA"])) == ["0x1", "0x2"]
+    assert c.args == (["tokA"], 200)
+    assert "ORDER BY MAX((raw->>'volume24hr')::float8) DESC" in c.q          # by volume, not liquidity
+    assert "updated_at > now() - interval '2 hours'" in c.q and "status = 'open'" in c.q
+    assert "NOT (token_yes_id = ANY($1::text[])" in c.q                        # websocket markets excluded
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
