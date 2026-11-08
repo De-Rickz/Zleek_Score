@@ -34,6 +34,13 @@ Modes:
   default    DRY RUN, read-only (the database session is read-only): fetch,
              map, look up which tx_hashes are already stored, report per group
              and per day, with a sample of new rows.
+  --diagnose N  read-only: classify the missing trades (near a stored trade /
+             not followed / never stored), list the N markets with the most,
+             with stored/missing per 10 minutes, and print the ONSET LOSS line.
+  --population volume  read-only: measure the websocket's 20 plus the next
+             200 by 24h volume instead of the worker's selections: the fixed
+             set for ROADMAP phase 4 steps 2 and 3 (run over a full UTC day,
+             with --diagnose, soon after the day ends).
   --apply    insert the new trades (about 1,000 per transaction), then rebuild
              bars_1m for the window (bars_jobs.rebuild_bars: only bars whose
              values change are rewritten). features_5m and signals_history are
@@ -260,6 +267,35 @@ def timeline(missing_ts, stored_ts, block=TIMELINE_BLOCK_SEC):
     return [(b, st, mi) for b, (st, mi) in sorted(rows.items())]
 
 
+def onset_share(per_group):
+    """The onset-loss share (ROADMAP phase 4, steps 2 and 3): of the trades
+    the Data API has for the measured markets, the share not stored because
+    the market wasn't followed at the time (not_followed + never_stored), and
+    separately the share near a stored trade (near_stored: dropped while
+    followed, or the edge of a join). per_group: [(trades, classify counts)]."""
+    total = sum(n for n, _ in per_group)
+    lost = sum(c["not_followed"] + c["never_stored"] for _, c in per_group)
+    near = sum(c["near_stored"] for _, c in per_group)
+    pct = lambda x: 100.0 * x / total if total else 0.0
+    return total, lost, pct(lost), near, pct(near)
+
+
+async def volume_condition_ids(conn, exclude_asset_ids, limit=200):
+    """The measured set for --population volume: the next `limit` markets by
+    24h volume after the websocket's, with load_asset_ids's filters (open,
+    >= $10k liquidity, refreshed by Gamma in the last 2 h). Its own query, so
+    the set doesn't change when the worker's backfill selection does."""
+    rows = await conn.fetch(
+        """SELECT condition_id FROM markets
+           WHERE status = 'open' AND liquidity_usd >= 10000 AND condition_id IS NOT NULL
+             AND updated_at > now() - interval '2 hours'
+             AND NOT (token_yes_id = ANY($1::text[]) OR token_no_id = ANY($1::text[]))
+           GROUP BY condition_id
+           ORDER BY MAX((raw->>'volume24hr')::float8) DESC NULLS LAST
+           LIMIT $2""", list(exclude_asset_ids), limit)
+    return [r["condition_id"] for r in rows]
+
+
 async def stored_times(conn, market_ids, start, end):
     """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
     rows = await conn.fetch(
@@ -316,8 +352,11 @@ async def main(args):
     try:
         asset_maps = await w.load_asset_maps(pool)
         ws_assets = await w.load_asset_ids(pool)
-        backfill_conds = await w.load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_assets)
         async with pool.acquire() as conn:
+            if args.population == "volume":
+                backfill_conds = await volume_condition_ids(conn, ws_assets)
+            else:
+                backfill_conds = await w.load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_assets)
             ws_conds = [r["condition_id"] for r in await conn.fetch(
                 """SELECT DISTINCT condition_id FROM markets
                    WHERE condition_id IS NOT NULL
@@ -329,6 +368,12 @@ async def main(args):
         print(f"{'APPLY' if args.apply else 'DRY RUN (read-only)'}: window {start:%Y-%m-%d %H:%M} to "
               f"{end:%Y-%m-%d %H:%M} UTC; backfill markets {len(backfill_conds)}, websocket markets {len(ws_conds)}; "
               f"{ended} markets with >= $10k liquidity closed since the window began (not covered)")
+        if args.population == "volume":
+            print("population: volume (the 'backfill' group is the next 200 by 24h volume, "
+                  "not the worker's backfill selection)")
+            if not backfill_conds:
+                print("   !! the volume set is EMPTY: no open market was refreshed by Gamma in the last "
+                      "2 h (is the worker's Gamma refresh running?); only the websocket group is measured")
 
         groups = {}
         async with httpx.AsyncClient(base_url=w.DATA_API_URL, timeout=REQUEST_TIMEOUT_SEC) as client:
@@ -343,13 +388,18 @@ async def main(args):
 
         to_write, seen = [], set()
         incomplete = 0
+        measured = []
         for name, (fetched, unmapped, items, markets, infos) in groups.items():
             new, already = split_new(items, existing)
             report(name, fetched, unmapped, markets, new, already, infos)
+            if args.diagnose and not new:
+                measured.append((already, {"near_stored": 0, "not_followed": 0, "never_stored": 0}))
             if args.diagnose and new:
                 async with pool.acquire() as conn:
                     times = await stored_times(conn, {e["market_id"] for e in new}, start, end)
-                print(f"   missing trades: {classify_missing(new, times)}  (near_stored = dropped while followed)")
+                counts = classify_missing(new, times)
+                measured.append((len(new) + already, counts))
+                print(f"   missing trades: {counts}  (near_stored = dropped while followed)")
                 by_market = collections.Counter(e["market_id"] for e in new)
                 for m, n in by_market.most_common(args.diagnose):
                     mc = classify_missing([e for e in new if e["market_id"] == m], times)
@@ -371,6 +421,12 @@ async def main(args):
             print("\nsample of new rows (ts, market, YES price, side, USD):")
             for e in sorted(to_write, key=lambda e: e["ts"])[::max(1, len(to_write) // args.sample)][:args.sample]:
                 print(f"   {e['ts'][:19]}  {e['market_id']:>10}  {e['price']:.4f}  {e['side']:<4}  {e['size_usd']:.2f}")
+
+        if args.diagnose:
+            total, lost, lost_pct, near, near_pct = onset_share(measured)
+            print(f"\nONSET LOSS: {lost} of {total} trades ({lost_pct:.1f}%) not stored because the market "
+                  f"wasn't followed; {near} ({near_pct:.1f}%) near a stored trade "
+                  f"(population: {args.population}{', incomplete batches: counts too low' if any(not b['complete'] for g in groups.values() for b in g[4]) else ''})")
 
         groups_written = "backfill" + (" + websocket" if args.include_websocket_markets else "")
         print(f"\nincomplete batches in the groups to write: {incomplete}")
@@ -411,7 +467,14 @@ def parse_args(argv=None):
                     help="read-only: split missing trades into near a stored trade of the same market "
                          "(dropped while followed) / not followed / never stored, and list the N "
                          "markets with the most missing")
-    return ap.parse_args(argv)
+    ap.add_argument("--population", choices=("selection", "volume"), default="selection",
+                    help="markets to fetch: 'selection' (default) = the worker's websocket and backfill "
+                         "selections; 'volume' = the websocket's 20 plus the next 200 by 24h volume, the "
+                         "fixed set for measuring the onset-loss share (dry run only)")
+    a = ap.parse_args(argv)
+    if a.population == "volume" and a.apply:
+        ap.error("--population volume is for measuring only; it can't be combined with --apply")
+    return a
 
 
 if __name__ == "__main__":
