@@ -278,6 +278,41 @@ def test_volume_condition_ids_query():
     assert "NOT (token_yes_id = ANY($1::text[])" in c.q                        # websocket markets excluded
 
 
+
+def _refused(argv):
+    import contextlib, io
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            r.parse_args(argv)
+        except SystemExit as e:
+            return e.code == 2
+    return False
+
+
+def test_markets_file_round_trip_and_flags():
+    import tempfile
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "set.txt")
+    r.write_markets_file(p, {"websocket": ["0xa", "0xb"], "backfill": ["0xc"]}, note="saved now\nrule")
+    text = open(p).read()
+    assert text.startswith("# measured set") and "# saved now\n# rule\n" in text
+    assert r.read_markets_file(p) == {"websocket": ["0xa", "0xb"], "backfill": ["0xc"]}
+    for bad in ("websocket 0xa\nbackfill 0xa\n", "other 0xa\n", "websocket\n", "# only a comment\n"):
+        with open(p, "w") as f:
+            f.write(bad)
+        try:
+            r.read_markets_file(p)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad!r}")
+    assert r.parse_args(["--markets-file", p, "--diagnose", "5"]).markets_file == p
+    assert r.parse_args(["--population", "volume", "--save-markets", p]).save_markets == p
+    assert _refused(["--markets-file", p, "--apply"])
+    assert _refused(["--save-markets", p])                                     # needs --population volume
+    assert _refused(["--population", "volume", "--save-markets", p, "--markets-file", p])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

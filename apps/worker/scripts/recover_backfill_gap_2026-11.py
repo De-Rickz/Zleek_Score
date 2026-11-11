@@ -41,6 +41,11 @@ Modes:
              200 by 24h volume instead of the worker's selections: the fixed
              set for ROADMAP phase 4 steps 2 and 3 (run over a full UTC day,
              with --diagnose, soon after the day ends).
+  --save-markets FILE  with --population volume: also write the measured set
+             (both groups' condition ids) to FILE, to freeze it.
+  --markets-file FILE  read-only: measure the set in FILE (written by
+             --save-markets) instead of ranking one now, so runs on different
+             days and at different times measure the same markets.
   --apply    insert the new trades (about 1,000 per transaction), then rebuild
              bars_1m for the window (bars_jobs.rebuild_bars: only bars whose
              values change are rewritten). features_5m and signals_history are
@@ -296,6 +301,41 @@ async def volume_condition_ids(conn, exclude_asset_ids, limit=200):
     return [r["condition_id"] for r in rows]
 
 
+MARKETS_FILE_GROUPS = ("websocket", "backfill")
+
+
+def write_markets_file(path, groups, note=""):
+    """One 'group condition_id' line per market, after # comment lines."""
+    with open(path, "w") as f:
+        f.write(f"# measured set for recover_backfill_gap_2026-11.py --markets-file\n")
+        for line in note.splitlines():
+            f.write(f"# {line}\n")
+        for g in MARKETS_FILE_GROUPS:
+            for c in groups[g]:
+                f.write(f"{g} {c}\n")
+
+
+def read_markets_file(path):
+    """group -> condition ids, in file order. Rejects unknown groups, malformed
+    lines and a condition id listed twice."""
+    groups, seen = {g: [] for g in MARKETS_FILE_GROUPS}, set()
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) != 2 or parts[0] not in groups:
+                raise ValueError(f"{path}:{n}: expected '<websocket|backfill> <condition_id>', got {line!r}")
+            if parts[1] in seen:
+                raise ValueError(f"{path}:{n}: {parts[1]} listed twice")
+            seen.add(parts[1])
+            groups[parts[0]].append(parts[1])
+    if not any(groups.values()):
+        raise ValueError(f"{path}: no markets")
+    return groups
+
+
 async def stored_times(conn, market_ids, start, end):
     """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
     rows = await conn.fetch(
@@ -353,14 +393,18 @@ async def main(args):
         asset_maps = await w.load_asset_maps(pool)
         ws_assets = await w.load_asset_ids(pool)
         async with pool.acquire() as conn:
-            if args.population == "volume":
-                backfill_conds = await volume_condition_ids(conn, ws_assets)
+            if args.markets_file:
+                frozen = read_markets_file(args.markets_file)
+                backfill_conds, ws_conds = frozen["backfill"], frozen["websocket"]
             else:
-                backfill_conds = await w.load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_assets)
-            ws_conds = [r["condition_id"] for r in await conn.fetch(
-                """SELECT DISTINCT condition_id FROM markets
-                   WHERE condition_id IS NOT NULL
-                     AND (token_yes_id = ANY($1::text[]) OR token_no_id = ANY($1::text[]))""", ws_assets)]
+                if args.population == "volume":
+                    backfill_conds = await volume_condition_ids(conn, ws_assets)
+                else:
+                    backfill_conds = await w.load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_assets)
+                ws_conds = [r["condition_id"] for r in await conn.fetch(
+                    """SELECT DISTINCT condition_id FROM markets
+                       WHERE condition_id IS NOT NULL
+                         AND (token_yes_id = ANY($1::text[]) OR token_no_id = ANY($1::text[]))""", ws_assets)]
             ended = await conn.fetchval(
                 """SELECT count(*) FROM markets
                    WHERE status <> 'open' AND liquidity_usd >= 10000
@@ -368,7 +412,16 @@ async def main(args):
         print(f"{'APPLY' if args.apply else 'DRY RUN (read-only)'}: window {start:%Y-%m-%d %H:%M} to "
               f"{end:%Y-%m-%d %H:%M} UTC; backfill markets {len(backfill_conds)}, websocket markets {len(ws_conds)}; "
               f"{ended} markets with >= $10k liquidity closed since the window began (not covered)")
-        if args.population == "volume":
+        if args.save_markets:
+            write_markets_file(args.save_markets, {"websocket": ws_conds, "backfill": backfill_conds},
+                               note=f"saved {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC: the websocket's "
+                                    f"markets then, plus the next {len(backfill_conds)} by Gamma's 24h volume")
+            print(f"measured set saved to {args.save_markets}: {len(ws_conds)} websocket + "
+                  f"{len(backfill_conds)} backfill condition ids")
+        if args.markets_file:
+            print(f"population: file {args.markets_file} ({len(ws_conds)} websocket + "
+                  f"{len(backfill_conds)} backfill condition ids, frozen; not today's ranking)")
+        elif args.population == "volume":
             print("population: volume (the 'backfill' group is the next 200 by 24h volume, "
                   "not the worker's backfill selection)")
             if not backfill_conds:
@@ -426,7 +479,7 @@ async def main(args):
             total, lost, lost_pct, near, near_pct = onset_share(measured)
             print(f"\nONSET LOSS: {lost} of {total} trades ({lost_pct:.1f}%) not stored because the market "
                   f"wasn't followed; {near} ({near_pct:.1f}%) near a stored trade "
-                  f"(population: {args.population}{', incomplete batches: counts too low' if any(not b['complete'] for g in groups.values() for b in g[4]) else ''})")
+                  f"(population: {'file' if args.markets_file else args.population}{', incomplete batches: counts too low' if any(not b['complete'] for g in groups.values() for b in g[4]) else ''})")
 
         groups_written = "backfill" + (" + websocket" if args.include_websocket_markets else "")
         print(f"\nincomplete batches in the groups to write: {incomplete}")
@@ -471,9 +524,17 @@ def parse_args(argv=None):
                     help="markets to fetch: 'selection' (default) = the worker's websocket and backfill "
                          "selections; 'volume' = the websocket's 20 plus the next 200 by 24h volume, the "
                          "fixed set for measuring the onset-loss share (dry run only)")
+    ap.add_argument("--save-markets", metavar="FILE",
+                    help="with --population volume: also write the measured set to FILE (to freeze it)")
+    ap.add_argument("--markets-file", metavar="FILE",
+                    help="measure the set in FILE (from --save-markets) instead of ranking one now (dry run only)")
     a = ap.parse_args(argv)
     if a.population == "volume" and a.apply:
         ap.error("--population volume is for measuring only; it can't be combined with --apply")
+    if a.markets_file and a.apply:
+        ap.error("--markets-file is for measuring only; it can't be combined with --apply")
+    if a.save_markets and (a.population != "volume" or a.markets_file):
+        ap.error("--save-markets needs --population volume (and no --markets-file)")
     return a
 
 
