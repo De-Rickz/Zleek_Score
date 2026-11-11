@@ -38,14 +38,21 @@ Modes:
              not followed / never stored), list the N markets with the most,
              with stored/missing per 10 minutes, and print the ONSET LOSS line.
   --population volume  read-only: measure the websocket's 20 plus the next
-             200 by 24h volume instead of the worker's selections: the fixed
-             set for ROADMAP phase 4 steps 2 and 3 (run over a full UTC day,
-             with --diagnose, soon after the day ends).
-  --save-markets FILE  with --population volume: also write the measured set
-             (both groups' condition ids) to FILE, to freeze it.
-  --markets-file FILE  read-only: measure the set in FILE (written by
-             --save-markets) instead of ranking one now, so runs on different
-             days and at different times measure the same markets.
+             200 by 24h volume instead of the worker's selections, ranked when
+             the script runs (used for the 2026-11-07 baseline; superseded by
+             --population day, since a later run ranks a different set).
+  --population day  read-only, the measured set for ROADMAP phase 4 from
+             2026-11-11 (window = one full UTC day): rank every market Gamma
+             listed on or after the day's start by that day's USD volume in the
+             Data API (size x price, so a penny-trade bot doesn't dominate);
+             'websocket' = the top 20, 'backfill' = the next 200. The set is
+             saved to measured-sets/<day>.txt the first time and read from
+             there afterwards, so every run for a day measures the same markets
+             whenever it runs. Ranking pages back through every candidate's
+             trades from now to the day's start: minutes, several more for a
+             day long past. A ranking batch that fails stops the run (no file).
+  --also-without MARKET_ID  also report each group's missing share without
+             this market (repeatable; e.g. 2772194).
   --apply    insert the new trades (about 1,000 per transaction), then rebuild
              bars_1m for the window (bars_jobs.rebuild_bars: only bars whose
              values change are rewritten). features_5m and signals_history are
@@ -76,7 +83,7 @@ import asyncio
 import collections
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ingestion"))
 
@@ -307,7 +314,7 @@ MARKETS_FILE_GROUPS = ("websocket", "backfill")
 def write_markets_file(path, groups, note=""):
     """One 'group condition_id' line per market, after # comment lines."""
     with open(path, "w") as f:
-        f.write(f"# measured set for recover_backfill_gap_2026-11.py --markets-file\n")
+        f.write("# measured set for recover_backfill_gap_2026-11.py --population day\n")
         for line in note.splitlines():
             f.write(f"# {line}\n")
         for g in MARKETS_FILE_GROUPS:
@@ -334,6 +341,74 @@ def read_markets_file(path):
     if not any(groups.values()):
         raise ValueError(f"{path}: no markets")
     return groups
+
+
+SETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measured-sets")
+DAY_WS, DAY_NEXT = 20, 200
+
+
+def day_set_path(sets_dir, day_start):
+    return os.path.join(sets_dir, f"{day_start:%Y-%m-%d}.txt")
+
+
+async def day_candidates(conn, day_start):
+    """Every market Gamma listed on or after the day's start: the refresher only
+    fetches open markets with >= $10k liquidity and bumps updated_at (Gamma's
+    updatedAt) on live ones within minutes, so a market that closed during or
+    after the day keeps its last updated_at >= the day's start. Markets created
+    after the day have no trades in it and rank at the bottom."""
+    rows = await conn.fetch(
+        """SELECT DISTINCT condition_id FROM markets
+           WHERE condition_id IS NOT NULL AND updated_at >= $1 ORDER BY 1""", day_start)
+    return [r["condition_id"] for r in rows]
+
+
+async def rank_by_day_volume(client, conds, start_unix, end_unix, progress_every=25):
+    """condition id -> (USD volume, trades) in the window, from the Data API,
+    paging each batch back to the window start. Raises if a batch fails: a
+    ranking with a batch missing would freeze the wrong set."""
+    usd, n = collections.Counter(), collections.Counter()
+    batches = w.condition_batches(conds)
+    for i, batch in enumerate(batches, 1):
+        try:
+            trades, _ = await fetch_batch(client, batch, start_unix, end_unix)
+        except Exception as e:
+            raise RuntimeError(f"ranking batch {i} of {len(batches)} failed ({type(e).__name__}: "
+                               f"{str(e)[:120]}); nothing saved, run again") from e
+        for t in trades:
+            c = t.get("condition_id")
+            usd[c] += float(t.get("size") or 0) * float(t.get("price") or 0)
+            n[c] += 1
+        if i % progress_every == 0 or i == len(batches):
+            print(f"   ranking: {i}/{len(batches)} batches, {Stats.requests} requests so far", flush=True)
+    return usd, n
+
+
+def day_groups(usd, ws=DAY_WS, nxt=DAY_NEXT):
+    """Top `ws` by USD volume, then the next `nxt`; markets with no volume are left out."""
+    ranked = sorted((c for c, v in usd.items() if v > 0), key=lambda c: (-usd[c], c))
+    return {"websocket": ranked[:ws], "backfill": ranked[ws:ws + nxt]}
+
+
+def missing_share_lines(items, existing, without=()):
+    """Missing / fetched for a group (deduped by tx_hash), and the same without each market in `without`."""
+    per, seen = collections.defaultdict(lambda: [0, 0]), set()
+    for e in items:
+        h = e.get("tx_hash")
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        per[e["market_id"]][0] += 1
+        per[e["market_id"]][1] += h not in existing
+
+    def line(label, keep):
+        tot = sum(v[0] for m, v in per.items() if keep(m))
+        mis = sum(v[1] for m, v in per.items() if keep(m))
+        return f"   missing share{label}: {mis} of {tot} ({100.0 * mis / tot if tot else 0:.1f}%)"
+    out = [line("", lambda m: True)]
+    for x in without:
+        out.append(line(f" without {x}", lambda m, x=x: m != x))
+    return out
 
 
 async def stored_times(conn, market_ids, start, end):
@@ -393,9 +468,14 @@ async def main(args):
         asset_maps = await w.load_asset_maps(pool)
         ws_assets = await w.load_asset_ids(pool)
         async with pool.acquire() as conn:
-            if args.markets_file:
-                frozen = read_markets_file(args.markets_file)
-                backfill_conds, ws_conds = frozen["backfill"], frozen["websocket"]
+            day_path, candidates = None, None
+            if args.population == "day":
+                day_path = day_set_path(args.sets_dir, start)
+                if not os.path.exists(day_path):
+                    candidates = await day_candidates(conn, start)
+                frozen = read_markets_file(day_path) if candidates is None else None
+                backfill_conds = frozen["backfill"] if frozen else []
+                ws_conds = frozen["websocket"] if frozen else []
             else:
                 if args.population == "volume":
                     backfill_conds = await volume_condition_ids(conn, ws_assets)
@@ -409,18 +489,31 @@ async def main(args):
                 """SELECT count(*) FROM markets
                    WHERE status <> 'open' AND liquidity_usd >= 10000
                      AND updated_at >= $1""", start)
+        if candidates is not None:
+            print(f"ranking {len(candidates)} candidate markets by {start:%Y-%m-%d}'s USD volume "
+                  f"(no {os.path.basename(day_path)} yet)", flush=True)
+            async with httpx.AsyncClient(base_url=w.DATA_API_URL, timeout=REQUEST_TIMEOUT_SEC) as client:
+                usd, ntr = await rank_by_day_volume(client, candidates, start_unix, end_unix)
+            g = day_groups(usd)
+            ws_conds, backfill_conds = g["websocket"], g["backfill"]
+            cut = lambda lst: f"${usd[lst[-1]]:,.0f}" if lst else "-"
+            os.makedirs(args.sets_dir, exist_ok=True)
+            write_markets_file(day_path, g, note=(
+                f"day {start:%Y-%m-%d} UTC, ranked {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC by the day's "
+                f"USD volume (Data API, size x price)\n"
+                f"{len(candidates)} candidates (markets Gamma listed on or after the day's start), "
+                f"{sum(1 for v in usd.values() if v > 0)} with volume\n"
+                f"websocket = top {DAY_WS} (20th: {cut(ws_conds)}), backfill = next {DAY_NEXT} "
+                f"(last: {cut(backfill_conds)})"))
+            print(f"measured set saved to {day_path}: {len(ws_conds)} + {len(backfill_conds)} markets; "
+                  f"20th {cut(ws_conds)}, 220th {cut(backfill_conds)}")
         print(f"{'APPLY' if args.apply else 'DRY RUN (read-only)'}: window {start:%Y-%m-%d %H:%M} to "
               f"{end:%Y-%m-%d %H:%M} UTC; backfill markets {len(backfill_conds)}, websocket markets {len(ws_conds)}; "
               f"{ended} markets with >= $10k liquidity closed since the window began (not covered)")
-        if args.save_markets:
-            write_markets_file(args.save_markets, {"websocket": ws_conds, "backfill": backfill_conds},
-                               note=f"saved {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC: the websocket's "
-                                    f"markets then, plus the next {len(backfill_conds)} by Gamma's 24h volume")
-            print(f"measured set saved to {args.save_markets}: {len(ws_conds)} websocket + "
-                  f"{len(backfill_conds)} backfill condition ids")
-        if args.markets_file:
-            print(f"population: file {args.markets_file} ({len(ws_conds)} websocket + "
-                  f"{len(backfill_conds)} backfill condition ids, frozen; not today's ranking)")
+        if args.population == "day":
+            print(f"population: day ({os.path.basename(day_path)}{', read from file' if candidates is None else ''}: "
+                  f"'websocket' = top {DAY_WS} by the day's USD volume, 'backfill' = the next {DAY_NEXT}; "
+                  f"not the worker's selections)")
         elif args.population == "volume":
             print("population: volume (the 'backfill' group is the next 200 by 24h volume, "
                   "not the worker's backfill selection)")
@@ -445,6 +538,8 @@ async def main(args):
         for name, (fetched, unmapped, items, markets, infos) in groups.items():
             new, already = split_new(items, existing)
             report(name, fetched, unmapped, markets, new, already, infos)
+            for line in missing_share_lines(items, existing, args.also_without):
+                print(line)
             if args.diagnose and not new:
                 measured.append((already, {"near_stored": 0, "not_followed": 0, "never_stored": 0}))
             if args.diagnose and new:
@@ -479,7 +574,7 @@ async def main(args):
             total, lost, lost_pct, near, near_pct = onset_share(measured)
             print(f"\nONSET LOSS: {lost} of {total} trades ({lost_pct:.1f}%) not stored because the market "
                   f"wasn't followed; {near} ({near_pct:.1f}%) near a stored trade "
-                  f"(population: {'file' if args.markets_file else args.population}{', incomplete batches: counts too low' if any(not b['complete'] for g in groups.values() for b in g[4]) else ''})")
+                  f"(population: {args.population}{', incomplete batches: counts too low' if any(not b['complete'] for g in groups.values() for b in g[4]) else ''})")
 
         groups_written = "backfill" + (" + websocket" if args.include_websocket_markets else "")
         print(f"\nincomplete batches in the groups to write: {incomplete}")
@@ -520,21 +615,21 @@ def parse_args(argv=None):
                     help="read-only: split missing trades into near a stored trade of the same market "
                          "(dropped while followed) / not followed / never stored, and list the N "
                          "markets with the most missing")
-    ap.add_argument("--population", choices=("selection", "volume"), default="selection",
+    ap.add_argument("--population", choices=("selection", "volume", "day"), default="selection",
                     help="markets to fetch: 'selection' (default) = the worker's websocket and backfill "
                          "selections; 'volume' = the websocket's 20 plus the next 200 by 24h volume, the "
                          "fixed set for measuring the onset-loss share (dry run only)")
-    ap.add_argument("--save-markets", metavar="FILE",
-                    help="with --population volume: also write the measured set to FILE (to freeze it)")
-    ap.add_argument("--markets-file", metavar="FILE",
-                    help="measure the set in FILE (from --save-markets) instead of ranking one now (dry run only)")
+    ap.add_argument("--sets-dir", default=SETS_DIR,
+                    help="where --population day keeps its per-day sets (default: scripts/measured-sets)")
+    ap.add_argument("--also-without", action="append", default=[], metavar="MARKET_ID",
+                    help="also report each group's missing share without this market (repeatable)")
     a = ap.parse_args(argv)
-    if a.population == "volume" and a.apply:
-        ap.error("--population volume is for measuring only; it can't be combined with --apply")
-    if a.markets_file and a.apply:
-        ap.error("--markets-file is for measuring only; it can't be combined with --apply")
-    if a.save_markets and (a.population != "volume" or a.markets_file):
-        ap.error("--save-markets needs --population volume (and no --markets-file)")
+    if a.population in ("volume", "day") and a.apply:
+        ap.error(f"--population {a.population} is for measuring only; it can't be combined with --apply")
+    if a.population == "day":
+        st, en = parse_utc(a.start), parse_utc(a.end)
+        if (st.hour, st.minute, st.second, st.microsecond) != (0, 0, 0, 0) or en - st != timedelta(days=1):
+            ap.error("--population day needs one full UTC day: --start YYYY-MM-DDT00:00Z --end <next day>T00:00Z")
     return a
 
 

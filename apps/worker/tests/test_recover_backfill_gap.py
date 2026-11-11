@@ -306,11 +306,62 @@ def test_markets_file_round_trip_and_flags():
             pass
         else:
             raise AssertionError(f"accepted {bad!r}")
-    assert r.parse_args(["--markets-file", p, "--diagnose", "5"]).markets_file == p
-    assert r.parse_args(["--population", "volume", "--save-markets", p]).save_markets == p
-    assert _refused(["--markets-file", p, "--apply"])
-    assert _refused(["--save-markets", p])                                     # needs --population volume
-    assert _refused(["--population", "volume", "--save-markets", p, "--markets-file", p])
+
+
+def test_population_day_flags():
+    day = ["--population", "day", "--start", "2026-11-09T00:00Z", "--end", "2026-11-10T00:00Z"]
+    a = r.parse_args(day + ["--diagnose", "5", "--also-without", "2772194"])
+    assert a.population == "day" and a.also_without == ["2772194"] and a.sets_dir.endswith("measured-sets")
+    assert _refused(day + ["--apply"])
+    assert _refused(["--population", "day", "--start", "2026-11-09T00:00Z", "--end", "2026-11-09T12:00Z"])
+    assert _refused(["--population", "day", "--start", "2026-11-09T01:00Z", "--end", "2026-11-10T01:00Z"])
+    from datetime import datetime, timezone
+    assert r.day_set_path("/x", datetime(2026, 11, 9, tzinfo=timezone.utc)) == "/x/2026-11-09.txt"
+
+
+def test_day_groups_rank_by_usd_not_trades():
+    usd = {f"0x{i:03d}": 1000.0 - i for i in range(300)}
+    usd["0xbot"] = 5.0          # many penny trades, little USD
+    usd["0xzero"] = 0.0
+    g = r.day_groups(usd)
+    assert g["websocket"] == [f"0x{i:03d}" for i in range(20)]
+    assert g["backfill"] == [f"0x{i:03d}" for i in range(20, 220)]
+    assert "0xbot" not in g["websocket"] + g["backfill"]
+    assert "0xzero" not in r.day_groups(usd, ws=5, nxt=500)["backfill"]       # no volume: left out
+
+
+def test_rank_by_day_volume_sums_usd_and_refuses_a_failed_batch():
+    calls = []
+    async def fake_fetch(client, batch, s, e):
+        calls.append(len(batch))
+        if "0xfail" in batch:
+            raise RuntimeError("boom")
+        return [{"condition_id": "0xa", "size": 10, "price": 0.5},
+                {"condition_id": "0xa", "size": 2, "price": 0.25},
+                {"condition_id": "0xb", "size": 1000, "price": 0.01}], {}
+    orig, r.fetch_batch = r.fetch_batch, fake_fetch
+    try:
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            usd, n = run(r.rank_by_day_volume(None, [f"0x{i}" for i in range(25)], 0, 1))
+            assert calls == [20, 5]
+            assert usd["0xa"] == 2 * (5.0 + 0.5) and n["0xa"] == 4 and usd["0xb"] == 2 * 10.0
+            try:
+                run(r.rank_by_day_volume(None, ["0xfail"], 0, 1))
+            except RuntimeError as e:
+                assert "nothing saved" in str(e)
+            else:
+                raise AssertionError("a failed ranking batch must stop the run")
+    finally:
+        r.fetch_batch = orig
+
+
+def test_missing_share_lines_with_and_without():
+    items = [{"tx_hash": "h1", "market_id": "2772194"}, {"tx_hash": "h2", "market_id": "2772194"},
+             {"tx_hash": "h3", "market_id": "9"}, {"tx_hash": "h4", "market_id": "9"},
+             {"tx_hash": "h4", "market_id": "9"}, {"tx_hash": None, "market_id": "9"}]
+    lines = r.missing_share_lines(items, existing={"h1", "h2", "h3"}, without=["2772194"])
+    assert lines == ["   missing share: 1 of 4 (25.0%)", "   missing share without 2772194: 1 of 2 (50.0%)"]
 
 
 if __name__ == "__main__":
