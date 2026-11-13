@@ -533,33 +533,69 @@ def summarize_backfill(queued, n_markets, n_requests, failed, first_error):
         logger.info("Backfill queued %d trades from %d markets (%d requests)", queued, n_markets, n_requests)
 
 
-async def run_backfill(pool, writer, hours_back=1):
+# --- Catch-up on entry to the backfill (ROADMAP phase 4 step 2c) ---
+# The backfill fetches only the last hour, so a market that has just entered
+# its top 200 (its 24h volume passed the 220th market's, which can take hours
+# for a new market) or come back after dropping out loses everything it traded
+# before that hour. A market new to the set is fetched over the last 24 hours
+# once (the window its volume was ranked on); the rest stay at the last hour.
+# "New" = not fetched successfully by the previous run in this process, so the
+# first run after a start, and markets whose batch failed, get 24 hours too.
+# REST_QUERY's ON CONFLICT (tx_hash) dedupes the overlap with what is stored.
+ENTRY_LOOKBACK = timedelta(hours=24)
+backfill_prev_conds = None   # condition ids the previous run fetched successfully
+
+
+def split_new_entries(conds, prev):
+    """(new to the set, already fetched by the previous run), in the given
+    order; with no previous run every market is new."""
+    if prev is None:
+        return list(conds), []
+    return [c for c in conds if c not in prev], [c for c in conds if c in prev]
+
+
+async def run_backfill(pool, writer, hours_back=1, entry_lookback=ENTRY_LOOKBACK):
     """
     🔄 The Producer: Fills the Redis buffer with recent public trades from the
     Data API. (The CLOB /data/trades endpoint only returns the authenticated
     wallet's own trades, which is why the old backfill wrote nothing.)
+    Markets new to the set get the last `entry_lookback` instead of
+    `hours_back` (step 2c, above).
     """
-    t_start = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-    cutoff_unix = int(t_start.timestamp())
+    global backfill_prev_conds
+    now = datetime.now(timezone.utc)
+    cutoff_unix = int((now - timedelta(hours=hours_back)).timestamp())
+    entry_cutoff_unix = int((now - entry_lookback).timestamp())
 
     asset_maps = await load_asset_maps(pool)
     ws_asset_ids = await load_asset_ids(pool)
     conds = await load_condition_ids_for_backfill(pool, exclude_asset_ids=ws_asset_ids)
+    new, known = split_new_entries(conds, backfill_prev_conds)
 
-    queued = failed = 0
+    queued = queued_entry = failed = 0
     first_error = None
-    batches = condition_batches(conds)
+    failed_conds = set()
+    plan = ([(b, entry_cutoff_unix, True) for b in condition_batches(new)]
+            + [(b, cutoff_unix, False) for b in condition_batches(known)])
     async with httpx.AsyncClient(base_url=DATA_API_URL, timeout=15.0) as client:
-        for batch in batches:
+        for batch, cutoff, is_entry in plan:
             try:
-                queued += await queue_public_trades(
-                    writer, await fetch_public_trades(client, batch, cutoff_unix), asset_maps)
+                n = await queue_public_trades(
+                    writer, await fetch_public_trades(client, batch, cutoff), asset_maps)
+                queued += n
+                queued_entry += n if is_entry else 0
             except Exception as e:
                 failed += 1
+                failed_conds.update(batch)
                 first_error = first_error or f"{type(e).__name__}: {e}"
                 logger.error("Backfill error for %d markets (first %s): %s", len(batch), batch[0], e)
-    summarize_backfill(queued, len(conds), len(batches), failed, first_error)
-            
+    backfill_prev_conds = set(conds) - failed_conds
+    if new:
+        logger.info("Backfill catch-up on entry: %d markets new to the set, %d trades queued from the last %s",
+                    len(new), queued_entry, entry_lookback)
+    summarize_backfill(queued, len(conds), len(plan), failed, first_error)
+
+
 async def run_backfill_loop(pool, writer, interval=3600, hours_back=1):
     """Periodically triggers the backfill process in the background."""
     logger.info(f"Starting backfill loop every {interval}s")
