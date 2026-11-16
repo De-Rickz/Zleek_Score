@@ -106,8 +106,29 @@ Backups grow with the database: the nightly dump went 54 -> 73 -> 92 MB on
 30 in the bucket (20 GB free tier). At cap 200 without compression the
 database would pass ~20 GB within ~40 days: dumps of ~2.5 GB, ~17 GB of local
 dumps on the same disk (so the real runway is shorter than the table says),
-and the bucket far over its free tier. Compressed chunks dump compressed, so
-the storage step keeps backups small too.
+and the bucket far over its free tier.
+
+**Off-site retention vs the 20 GB free tier (2026-11-16).** The 2026-11-16
+dump is 653 MB and the dumps grow ~60 MB a night, so 30 days of dumps (the
+bucket's lifecycle rule) is already ~20 GB and rising ~1.8 GB a week: the
+bucket will pass the free tier within days of filling its 30-day window.
+What happens then depends on the account: on a Free Tier account uploads
+beyond 20 GB are refused (the script's FAIL and push now say so); on a paid
+account the excess is billed (Standard storage is about $0.03/GB-month, i.e.
+cents). Options, to decide: (1) cut the lifecycle rule to 14 days (~9-10 GB
+now); (2) keep 7-14 daily plus one dump a week for 8 weeks under a `weekly/`
+prefix with its own lifecycle rule (the script copies Sunday's dump there);
+(3) pay for the excess. The script warns when the bucket passes 17 GB.
+
+**Does trades_archive compression shrink the dumps?** Not much, probably.
+pg_dump writes compressed chunks in their compressed form, and `-Fc -Z 6`
+already compresses the plain rows ~9x (5.8 GB database, 653 MB dump on
+2026-11-16), while TimescaleDB's compressed columns (lz4 and its own
+encodings) leave zlib little to remove. So the database shrinks ~4x but the
+dump may shrink far less, or stay about the same: measured in the
+trades_archive rehearsal (dump the copy before and after) before anything is
+decided on it. Retention (features_5m 30 days, signals_history 90 days,
+ob_snapshots 30 days) does shrink the dumps, since deleted rows aren't dumped.
 
 ## Phase 4 storage step (before the websocket cap raise)
 
