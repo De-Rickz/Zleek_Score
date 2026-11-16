@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly trades_archive rehearsal on the Mac (infra/mac/zleek-nightly-rehearsal.sh).
+  04:30 local time every day. A calendar job whose time passed while the Mac
+  was asleep runs once on wake (launchd's StartCalendarInterval behaviour); a
+  Mac that was shut down skips it. Install: docs/trades-archive-design.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zleek.rehearsal</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/derrick/bin/zleek-nightly-rehearsal.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/derrick/zleek-rehearsal/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/derrick/zleek-rehearsal/launchd.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>
