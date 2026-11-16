@@ -7,8 +7,9 @@ every backfill request failed until step 2b (Data API v2) deployed on
 re-fetches that window from v2 and stores what is missing, through the same
 code as the live backfill: load_condition_ids_for_backfill, condition_batches,
 fetch_public_trades, queue_public_trades (YES terms, size in USD), the
-writer's _map_rest and REST_QUERY (ON CONFLICT (tx_hash), price updated only
-when it changed). Only the write path differs: direct batched inserts instead
+writer's _map_rest and REST_QUERY (zleek_store_trade: ON CONFLICT (tx_hash),
+price updated only when it changed; older than the archive cutoff, into
+trades_archive unless either table holds the tx_hash). Only the write path differs: direct batched inserts instead
 of the Redis queue.
 
 Markets, reported as two groups:
@@ -424,7 +425,15 @@ SOURCE_SQL = ("CASE WHEN jsonb_typeof(raw) = 'string' AND position('\"event_type
               "WHEN raw ? 'transactionHash' THEN 'data_api_v1' ELSE 'other' END")
 
 
-async def stored_ts_by_hash(conn, hashes):
+# Set by main() when the database has trades_archive (ROADMAP phase 4
+# storage, docs/trades-archive-design.md): lookups then also read the archive,
+# narrowed to the run's window +-ARCHIVE_MARGIN (it has no unique tx_hash
+# index on compressed chunks, so an unbounded tx_hash lookup would scan it).
+ARCHIVE = False
+ARCHIVE_MARGIN = timedelta(minutes=1)
+
+
+async def stored_ts_by_hash(conn, hashes, start=None, end=None):
     """tx_hash -> (stored ts as epoch seconds with fractions, which path stored
     the row), classified by SOURCE_SQL. Read-only."""
     hashes, out = list(hashes), {}
@@ -433,6 +442,12 @@ async def stored_ts_by_hash(conn, hashes):
             f"SELECT tx_hash, extract(epoch FROM ts)::float8 AS t, {SOURCE_SQL} AS src "
             "FROM trades WHERE tx_hash = ANY($1::text[])", hashes[i:i + LOOKUP_BATCH])
         out.update((r["tx_hash"], (r["t"], r["src"])) for r in rows)
+        if ARCHIVE and start is not None:
+            rows = await conn.fetch(
+                f"SELECT tx_hash, extract(epoch FROM ts)::float8 AS t, {SOURCE_SQL} AS src "
+                "FROM trades_archive WHERE tx_hash = ANY($1::text[]) AND ts BETWEEN $2 AND $3",
+                hashes[i:i + LOOKUP_BATCH], start - ARCHIVE_MARGIN, end + ARCHIVE_MARGIN)
+            out.update((r["tx_hash"], (r["t"], r["src"])) for r in rows)
     return out
 
 
@@ -470,7 +485,8 @@ def ts_check_report(items, stored):
 async def stored_times(conn, market_ids, start, end):
     """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
     rows = await conn.fetch(
-        """SELECT market_id, array_agg(extract(epoch FROM ts)::bigint ORDER BY ts) AS t FROM trades
+        f"""SELECT market_id, array_agg(extract(epoch FROM ts)::bigint ORDER BY ts) AS t
+           FROM {'trades_all' if ARCHIVE else 'trades'}
            WHERE market_id = ANY($1::text[]) AND ts >= $2 AND ts <= $3 GROUP BY 1""",
         list(market_ids), start, end)
     return {r["market_id"]: list(r["t"]) for r in rows}
@@ -481,13 +497,19 @@ def per_day(items):
     return dict(sorted(c.items()))
 
 
-async def stored_hashes(conn, hashes):
-    """Which of these tx_hashes are already in trades (uses its unique index)."""
+async def stored_hashes(conn, hashes, start=None, end=None):
+    """Which of these tx_hashes are already stored: in trades (its unique
+    index), and with ARCHIVE in trades_archive within [start, end] +- margin."""
     hashes, found = list(hashes), set()
     for i in range(0, len(hashes), LOOKUP_BATCH):
         rows = await conn.fetch("SELECT tx_hash FROM trades WHERE tx_hash = ANY($1::text[])",
                                 hashes[i:i + LOOKUP_BATCH])
         found.update(r["tx_hash"] for r in rows)
+        if ARCHIVE and start is not None:
+            rows = await conn.fetch(
+                "SELECT tx_hash FROM trades_archive WHERE tx_hash = ANY($1::text[]) AND ts BETWEEN $2 AND $3",
+                hashes[i:i + LOOKUP_BATCH], start - ARCHIVE_MARGIN, end + ARCHIVE_MARGIN)
+            found.update(r["tx_hash"] for r in rows)
     return found
 
 
@@ -521,6 +543,8 @@ async def main(args):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=2,
                                      server_settings=settings)
     try:
+        global ARCHIVE
+        ARCHIVE = bool(await pool.fetchval("SELECT to_regclass('public.trades_archive') IS NOT NULL"))
         asset_maps = await w.load_asset_maps(pool)
         ws_assets = await w.load_asset_ids(pool)
         async with pool.acquire() as conn:
@@ -586,7 +610,7 @@ async def main(args):
 
         async with pool.acquire() as conn:
             all_hashes = {e["tx_hash"] for g in groups.values() for e in g[2] if e.get("tx_hash")}
-            existing = await stored_hashes(conn, all_hashes)
+            existing = await stored_hashes(conn, all_hashes, start, end)
 
         to_write, seen = [], set()
         incomplete = 0
@@ -599,7 +623,7 @@ async def main(args):
             if args.check_ts:
                 async with pool.acquire() as conn:
                     stored = await stored_ts_by_hash(conn, {e["tx_hash"] for e in items
-                                                            if e.get("tx_hash") in existing})
+                                                            if e.get("tx_hash") in existing}, start, end)
                 print("   timestamp check (stored ts minus Data API timestamp):")
                 for line in ts_check_report(items, stored):
                     print(line)
@@ -646,9 +670,9 @@ async def main(args):
                   f"and rebuild bars_1m for the window.")
             return
         async with pool.acquire() as conn:
-            before = len(await stored_hashes(conn, [e["tx_hash"] for e in to_write]))
+            before = len(await stored_hashes(conn, [e["tx_hash"] for e in to_write], start, end))
             await insert_new(conn, to_write)
-            after = len(await stored_hashes(conn, [e["tx_hash"] for e in to_write]))
+            after = len(await stored_hashes(conn, [e["tx_hash"] for e in to_write], start, end))
             print(f"\nAPPLIED: {after - before} trades inserted ({groups_written}); "
                   f"{len(to_write) - (after - before)} were stored meanwhile by the running worker")
             for day, n in per_day(to_write).items():

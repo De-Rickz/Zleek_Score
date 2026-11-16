@@ -28,7 +28,7 @@ select
     (array_agg(t.price order by t.ts desc, t.id desc))[1] as close,
     sum(t.size_usd) as volume_usd,
     count(*) as trades_cnt
-from trades t
+from trades_all t   -- both tables: rebuilds of old windows (recovery, repairs) read the archive
 where t.ts >= $1 and t.ts < $2
 group by t.market_id, date_trunc('minute', t.ts)
 on conflict (market_id, bucket) do update

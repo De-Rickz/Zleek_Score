@@ -46,7 +46,11 @@ export async function getDashboardRows() {
             WHERE b.market_id = s.market_id AND b.bucket > now() - interval '240 minutes')::int AS bars_in_window
     FROM signals_latest s
     JOIN markets m ON m.id = s.market_id
-    LEFT JOIN LATERAL (SELECT max(ts) AS ts FROM trades t WHERE t.market_id = s.market_id) lt ON true
+    -- Newest trade: trades (last 4 days) first, else the archive; every archived
+    -- row is older than every row in trades (docs/trades-archive-design.md).
+    LEFT JOIN LATERAL (SELECT coalesce(
+        (SELECT max(ts) FROM trades t WHERE t.market_id = s.market_id),
+        (SELECT max(ts) FROM trades_archive a WHERE a.market_id = s.market_id)) AS ts) lt ON true
     LEFT JOIN LATERAL (SELECT max(bucket) AS bucket FROM bars_1m b WHERE b.market_id = s.market_id) lb ON true`)
 }
 
@@ -77,7 +81,7 @@ export async function getRecentTrades(marketId: string, limit = 50) {
   return plain(await sql<Trade[]>`
     SELECT (extract(epoch FROM ts) * 1000)::float8 AS ts_ms,
            price::float8 AS price, size_usd::float8 AS size_usd, side
-    FROM trades WHERE market_id = ${marketId}
+    FROM trades_all WHERE market_id = ${marketId}
     ORDER BY ts DESC LIMIT ${limit}`)
 }
 

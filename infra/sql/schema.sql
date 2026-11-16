@@ -72,3 +72,6 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 SELECT create_hypertable('bars_1m', 'bucket');
 
 
+
+-- Since phase 4 storage: trades_archive, the trades_all view and
+-- zleek_store_trade come from infra/sql/migrations/trades_archive.sql.

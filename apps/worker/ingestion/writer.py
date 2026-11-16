@@ -102,19 +102,18 @@ class EliteZleekWriter:
         # same trades every run and the websocket can redeliver, so sizes would
         # inflate. A real fix needs a per-fill unique key (schema change).
         # Monitor with scripts/check_multifill_collisions.py.
+        # Through zleek_store_trade (infra/sql/migrations/trades_archive.sql,
+        # ROADMAP phase 4 storage): a trade newer than archive_cutoff() (4 UTC
+        # days) is the same upsert as before into trades: ON CONFLICT (tx_hash)
+        # DO UPDATE SET price only WHERE the price changed (step 2a: the
+        # backfill re-fetches each trade ~12 times, and an unconditional update
+        # would write a new row version every time). An older trade (only the
+        # recovery script or a repair writes those) goes to trades_archive
+        # unless either table already holds its tx_hash. The cutoff is the
+        # database's, the same one the nightly move uses.
         self.REST_QUERY = """
-            INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side,
-                               maker_wallet, taker_wallet, tx_hash, raw, status,
-                               market_order_id, match_time)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            ON CONFLICT (tx_hash) DO UPDATE SET price=EXCLUDED.price
-            WHERE trades.price IS DISTINCT FROM EXCLUDED.price;
+            SELECT zleek_store_trade($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13);
         """
-        # The WHERE (ROADMAP phase 4 step 2a): the periodic backfill re-fetches
-        # the last hour every 5 minutes, so each trade arrives ~12 times. An
-        # unconditional DO UPDATE writes a new row version every time, even
-        # with the same price (dead rows, WAL, autovacuum); with the WHERE,
-        # Postgres skips the write unless the price actually changed.
         
         self.WS_QUERY = """
             INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side, raw)
@@ -642,8 +641,13 @@ async def wait_for_writer_drain(writer, timeout_sec=GAP_FLUSH_WAIT_SEC, interval
 async def newest_stored_trade(pool):
     """Read BEFORE the websocket and flush loop start: once they run, fresh live
     trades make the gap look empty."""
+    # Both tables: after an outage longer than the archive cutoff (4 days) the
+    # nightly move (a database job, it runs while the worker is down) would
+    # leave trades empty, and the gap backfill would think the database new.
+    # Every archived row is older than every row in trades.
     async with pool.acquire() as conn:
-        return await conn.fetchval("SELECT max(ts) FROM trades")
+        return await conn.fetchval(
+            "SELECT coalesce((SELECT max(ts) FROM trades), (SELECT max(ts) FROM trades_archive))")
 
 async def run_gap_backfill(pool, writer, newest_trade_ts):
     """
