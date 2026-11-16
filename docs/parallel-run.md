@@ -473,7 +473,7 @@ Production's database is the only copy once the Mac is off.
 **Nightly on-disk dump** (installed as `~/bin/zleek-db-backup.sh`, source in
 `infra/backup/zleek-db-backup.sh`): `pg_dump -Fc` (compressed custom format)
 inside the `zleek_db` container, written to `~/backups/zleek-db/`, checked
-with `pg_restore --list` before it's kept, newest 7 kept. One line per run in
+with `pg_restore --list` before it's kept, newest 3 kept (7 until 2026-11-16, cut to save disk; ZLEEK_BACKUP_KEEP=3 in the crontab line). One line per run in
 `~/backups/zleek-db/backup.log` (`OK …` / `FAIL …` / `SKIP …`). A failed run
 removes its partial file and never deletes older dumps.
 
@@ -507,8 +507,8 @@ logs `FAIL`, pings healthchecks `/fail` and exits 1.
 - Retention: bucket lifecycle rules, run by Oracle itself (policy
   `Allow service objectstorage-<region> to manage object-family in compartment
   zleek_backups`): delete `daily/` objects after 30 days; delete uncommitted
-  multipart uploads after 2 days. Local disk keeps 7.
-- Crontab: `20 3 * * * ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
+  multipart uploads after 2 days. Local disk keeps 3 (7 until 2026-11-16).
+- Crontab: `20 3 * * * ZLEEK_BACKUP_KEEP=3 ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
   /home/ubuntu/bin/zleek-db-backup.sh >> /home/ubuntu/backups/zleek-db/cron.log 2>&1`
 - Restore from the bucket: `rclone copy zleek-offsite:zleek_db_backups/daily/<dump>
   /tmp/restore/`, then the throwaway-container restore above.
