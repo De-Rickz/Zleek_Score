@@ -53,6 +53,11 @@ Modes:
              day long past. A ranking batch that fails stops the run (no file).
   --also-without MARKET_ID  also report each group's missing share without
              this market (repeatable; e.g. 2772194).
+  --check-ts read-only: for every fetched trade that is already stored (same
+             tx_hash), compare the stored ts with the Data API's timestamp,
+             split by which path stored the row (websocket or Data API). Answers
+             whether (tx_hash, ts) could replace tx_hash as the unique key when
+             trades becomes a hypertable (ROADMAP phase 4 storage step).
   --apply    insert the new trades (about 1,000 per transaction), then rebuild
              bars_1m for the window (bars_jobs.rebuild_bars: only bars whose
              values change are rewritten). features_5m and signals_history are
@@ -411,6 +416,57 @@ def missing_share_lines(items, existing, without=()):
     return out
 
 
+# Which path stored a trades row, from its raw: the websocket handler stores
+# the event as a JSON string (jsonb scalar) holding event_type; the backfill
+# stores the Data API trade as an object (v2: proxy_wallet; v1: transactionHash).
+SOURCE_SQL = ("CASE WHEN jsonb_typeof(raw) = 'string' AND position('\"event_type\"' IN raw #>> '{}') > 0 "
+              "THEN 'websocket' WHEN raw ? 'proxy_wallet' THEN 'data_api' "
+              "WHEN raw ? 'transactionHash' THEN 'data_api_v1' ELSE 'other' END")
+
+
+async def stored_ts_by_hash(conn, hashes):
+    """tx_hash -> (stored ts as epoch seconds with fractions, which path stored
+    the row), classified by SOURCE_SQL. Read-only."""
+    hashes, out = list(hashes), {}
+    for i in range(0, len(hashes), LOOKUP_BATCH):
+        rows = await conn.fetch(
+            f"SELECT tx_hash, extract(epoch FROM ts)::float8 AS t, {SOURCE_SQL} AS src "
+            "FROM trades WHERE tx_hash = ANY($1::text[])", hashes[i:i + LOOKUP_BATCH])
+        out.update((r["tx_hash"], (r["t"], r["src"])) for r in rows)
+    return out
+
+
+def ts_check_report(items, stored):
+    """Lines comparing the Data API timestamp (whole seconds) of each fetched
+    trade with the stored row's ts, per storing path. Also counts tx_hashes
+    that the Data API itself returns with more than one timestamp."""
+    api_ts = collections.defaultdict(set)
+    for e in items:
+        if e.get("tx_hash"):
+            api_ts[e["tx_hash"]].add(datetime.fromisoformat(e["ts"]).timestamp())
+    by_src = collections.defaultdict(list)
+    for h, ts_set in api_ts.items():
+        if h in stored:
+            t, src = stored[h]
+            by_src[src].append(t - min(ts_set))
+    lines = [f"   Data API tx_hashes with more than one timestamp: "
+             f"{sum(1 for v in api_ts.values() if len(v) > 1)} of {len(api_ts)}"]
+    for src in sorted(by_src):
+        d = by_src[src]
+        n = len(d)
+        exact = sum(1 for x in d if x == 0)
+        same_sec = sum(1 for x in d if 0 <= x < 1)
+        buckets = [("<= 1 s", 1), ("<= 5 s", 5), ("<= 60 s", 60)]
+        parts = [f"{lbl}: {sum(1 for x in d if abs(x) <= lim)}" for lbl, lim in buckets]
+        worst = max(d, key=abs)
+        lines.append(f"   stored by {src}: {n} compared; ts identical {exact} ({100.0 * exact / n:.1f}%), "
+                     f"same second {same_sec}; |diff| {', '.join(parts)}, > 60 s: "
+                     f"{sum(1 for x in d if abs(x) > 60)}; largest {worst:+.3f} s")
+    if not by_src:
+        lines.append("   no fetched trade was already stored: nothing to compare")
+    return lines
+
+
 async def stored_times(conn, market_ids, start, end):
     """market_id -> sorted epoch seconds of its stored trades in the window (read-only)."""
     rows = await conn.fetch(
@@ -540,6 +596,13 @@ async def main(args):
             report(name, fetched, unmapped, markets, new, already, infos)
             for line in missing_share_lines(items, existing, args.also_without):
                 print(line)
+            if args.check_ts:
+                async with pool.acquire() as conn:
+                    stored = await stored_ts_by_hash(conn, {e["tx_hash"] for e in items
+                                                            if e.get("tx_hash") in existing})
+                print("   timestamp check (stored ts minus Data API timestamp):")
+                for line in ts_check_report(items, stored):
+                    print(line)
             if args.diagnose and not new:
                 measured.append((already, {"near_stored": 0, "not_followed": 0, "never_stored": 0}))
             if args.diagnose and new:
@@ -621,6 +684,8 @@ def parse_args(argv=None):
                          "fixed set for measuring the onset-loss share (dry run only)")
     ap.add_argument("--sets-dir", default=SETS_DIR,
                     help="where --population day keeps its per-day sets (default: scripts/measured-sets)")
+    ap.add_argument("--check-ts", action="store_true",
+                    help="compare stored ts with the Data API timestamp for trades already stored (read-only)")
     ap.add_argument("--also-without", action="append", default=[], metavar="MARKET_ID",
                     help="also report each group's missing share without this market (repeatable)")
     a = ap.parse_args(argv)

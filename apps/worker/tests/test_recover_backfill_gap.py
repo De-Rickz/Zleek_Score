@@ -364,6 +364,24 @@ def test_missing_share_lines_with_and_without():
     assert lines == ["   missing share: 1 of 4 (25.0%)", "   missing share without 2772194: 1 of 2 (50.0%)"]
 
 
+
+def test_ts_check_report_per_source():
+    def it(h, sec):
+        from datetime import datetime, timezone
+        return {"tx_hash": h, "ts": datetime.fromtimestamp(sec, timezone.utc).isoformat(), "market_id": "m"}
+    items = [it("a", 100), it("b", 200), it("c", 300), it("d", 400), it("d", 401), it("e", 500)]
+    stored = {"a": (100.0, "data_api"), "b": (200.437, "websocket"), "c": (303.0, "websocket"),
+              "d": (400.0, "data_api")}                       # e not stored
+    lines = r.ts_check_report(items, stored)
+    assert lines[0] == "   Data API tx_hashes with more than one timestamp: 1 of 5"
+    assert lines[1].startswith("   stored by data_api: 2 compared; ts identical 2 (100.0%), same second 2")
+    ws = lines[2]
+    assert ws.startswith("   stored by websocket: 2 compared; ts identical 0 (0.0%), same second 1")
+    assert "<= 1 s: 1, <= 5 s: 2, <= 60 s: 2, > 60 s: 0; largest +3.000 s" in ws
+    assert r.ts_check_report(items, {}) [-1].endswith("nothing to compare")
+    assert r.parse_args(["--check-ts"]).check_ts
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
