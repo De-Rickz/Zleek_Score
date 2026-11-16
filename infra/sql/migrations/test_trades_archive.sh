@@ -5,16 +5,32 @@
 # infra/sql/schema.sql and the migration, and checks the design's guarantees.
 #
 #   infra/sql/migrations/test_trades_archive.sh        # from the repo root
+#
+# Or against an EMPTY throwaway database that already runs (CI's service
+# container): ZLEEK_TEST_DATABASE_URL=postgresql://postgres:...@host:port/db,
+# a superuser, TimescaleDB available; psql on the PATH. Never a real database:
+# the test creates tables and writes.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 IMAGE="${ZLEEK_TEST_IMAGE:-timescale/timescaledb:2.31.0-pg16}"
-NAME="zleek_trades_archive_test_$$"
-PORT="${ZLEEK_TEST_PORT:-55433}"   # localhost only, for the Python end-to-end checks
-docker run -d --rm --name "$NAME" -p "127.0.0.1:$PORT:5432" -e POSTGRES_PASSWORD=test "$IMAGE" > /dev/null
-trap 'docker rm -f "$NAME" > /dev/null 2>&1 || true' EXIT
-for _ in $(seq 60); do docker exec "$NAME" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
-sleep 2
-q() { docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$NAME" psql -U postgres -d postgres -X -q -v ON_ERROR_STOP=1 -tA "$@"; }
+PYTHON="${ZLEEK_TEST_PYTHON:-apps/worker/.venv/bin/python}"
+if [ -n "${ZLEEK_TEST_DATABASE_URL:-}" ]; then
+    URL="$ZLEEK_TEST_DATABASE_URL"
+    IMAGE="the database at ZLEEK_TEST_DATABASE_URL"
+    q() { PGOPTIONS='-c client_min_messages=warning' psql "$URL" -X -q -v ON_ERROR_STOP=1 -tA "$@"; }
+    [ "$(q -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" = 0 ] \
+        || { echo "ZLEEK_TEST_DATABASE_URL must point at an empty throwaway database" >&2; exit 1; }
+else
+    NAME="zleek_trades_archive_test_$$"
+    PORT="${ZLEEK_TEST_PORT:-55433}"   # localhost only, for the Python end-to-end checks
+    URL="postgresql://postgres:test@127.0.0.1:$PORT/postgres"
+    docker run -d --rm --name "$NAME" -p "127.0.0.1:$PORT:5432" -e POSTGRES_PASSWORD=test "$IMAGE" > /dev/null
+    trap 'docker rm -f "$NAME" > /dev/null 2>&1 || true' EXIT
+    for _ in $(seq 60); do docker exec "$NAME" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
+    sleep 2
+    q() { docker exec -i -e PGOPTIONS='-c client_min_messages=warning' "$NAME" psql -U postgres -d postgres -X -q -v ON_ERROR_STOP=1 -tA "$@"; }
+fi
+q -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb'" | sed 's/^/timescaledb available: /'
 pass=0
 check() {  # check NAME EXPECTED SQL
     local got; got="$(q -c "$3")"
@@ -102,5 +118,4 @@ check "job runs (nothing left to move at today's cutoff)" "0" "SELECT count(*) F
 echo "all $pass SQL checks passed ($IMAGE)"
 
 # The worker's own code against this database (apps/worker/tests/test_trades_archive_db.py).
-ZLEEK_TEST_DATABASE_URL="postgresql://postgres:test@127.0.0.1:$PORT/postgres" \
-    apps/worker/.venv/bin/python apps/worker/tests/test_trades_archive_db.py
+ZLEEK_TEST_DATABASE_URL="$URL" "$PYTHON" apps/worker/tests/test_trades_archive_db.py

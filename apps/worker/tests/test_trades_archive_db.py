@@ -48,7 +48,7 @@ def item(market, ts, tx, price=0.5):
 async def main():
     url = os.environ.get("ZLEEK_TEST_DATABASE_URL")
     if not url:
-        print("skipped: ZLEEK_TEST_DATABASE_URL not set (run infra/sql/migrations/test_trades_archive.sh)")
+        print("SKIPPED (needs a throwaway TimescaleDB: ZLEEK_TEST_DATABASE_URL; run by infra/sql/migrations/test_trades_archive.sh and the trades-archive CI job): all end-to-end checks")
         return
     pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
     q = w.EliteZleekWriter(db_pool=None, redis_client=None)
