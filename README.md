@@ -1,5 +1,7 @@
 # Zleek Score
 
+[![CI](https://github.com/De-Rickz/Zleek_Score/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/De-Rickz/Zleek_Score/actions/workflows/ci.yml)
+
 Ingests live Polymarket market/orderbook/trade data into Postgres (TimescaleDB) and
 Redis, computes rolling signals (features, "tremor" score), and serves them through a
 Next.js web app.

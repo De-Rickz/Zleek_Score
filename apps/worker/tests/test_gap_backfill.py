@@ -9,6 +9,9 @@ runs against any database that has a markets table. The offline v2 client
 tests are in test_data_api_v2.py.
 
     cd apps/worker && DATABASE_URL=... .venv/bin/python tests/test_gap_backfill.py
+
+Offline (CI, or no DATABASE_URL, or ZLEEK_OFFLINE=1): only the offline part
+(test_compute_gap_window) runs, and the live part is reported as SKIPPED.
 """
 import asyncio
 import os
@@ -163,8 +166,15 @@ async def live_conditions(pool, n=4):
     return [c for c in busiest if c in known][:n]
 
 
+LIVE_TESTS = "test_v2_paging_live, test_run_gap_backfill"
+
+
 async def main():
     test_compute_gap_window()
+    print("ok test_compute_gap_window")
+    if os.environ.get("ZLEEK_OFFLINE") or not os.environ.get("DATABASE_URL"):
+        print(f"SKIPPED (live: needs DATABASE_URL and the live Data API): {LIVE_TESTS}")
+        return
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=2,
                                      server_settings={"default_transaction_read_only": "on"})
     try:
