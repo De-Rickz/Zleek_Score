@@ -2,6 +2,22 @@
 
 Status: design, 2026-11-16, for review. Nothing here is built yet.
 
+## Requirements (set by the human, 2026-11-16)
+
+1. **Dedupe across both tables** for any write older than the cutoff: a
+   trade already in `trades` or `trades_archive` is never stored again.
+   (Writes older than the cutoff, below.)
+2. **A `trades_all` view** that every history reader uses. (Tables; Read paths.)
+3. **A single-transaction nightly move**: no moment where a row is in both
+   tables or neither. (Nightly move.)
+4. **A rehearsal on a restored production dump** before the production run,
+   timing each step and measuring peak disk. (Rehearsal.)
+5. Carried over from the option A requirements: the production run starts
+   from a **fresh backup verified off-site** and an **updated restore test**
+   (the database is ~5.8 GB), and **inserts into compressed chunks must work
+   and dedupe correctly on TimescaleDB 2.31** (production's version), for the
+   recovery script and any repair. (Initial migration; Rehearsal.)
+
 ## Why this shape (option B)
 
 TimescaleDB compression cuts trades ~4.2x (tested 2026-11-16: 162 MB -> 39 MB
@@ -111,8 +127,11 @@ they were, with a note that they predate the archive.
 
 ## Initial migration (production, once)
 
-1. Fresh manual backup with the off-site copy; updated restore test passes on
-   it (database now ~5.8 GB).
+1. Fresh manual backup, confirmed off-site (`OK … offsite=ok` in backup.log
+   and `rclone check --size-only --one-way` against the bucket: 0
+   differences), and the restore test, updated to count `trades_all` once the
+   archive exists, passes on that dump (database ~5.8 GB: check the
+   throwaway container has the disk for it).
 2. Create `trades_archive`, the view and the procedure (no job yet).
 3. Move the backlog **one day per transaction**, oldest first (from the oldest stored
    day to the cutoff; ~2.6 GB on 2026-11-16), each with the same `DELETE ... RETURNING` statement.
@@ -136,7 +155,15 @@ container (the production version) and run the migration exactly as above:
 - dedupe: write an archived trade again through `ARCHIVE_QUERY` (with the
   websocket's ts and with the Data API's) and through the recovery script:
   0 rows added; a genuinely new old trade: 1 row added, into a compressed chunk;
-- the nightly move twice in a row: the second moves nothing.
+- inserts into **compressed** chunks on 2.31.0 (production's version): an
+  archived trade written again is refused by the dedupe whether its chunk is
+  compressed or not, and a new old trade lands in a compressed chunk and
+  reads back through `trades_all`;
+- the nightly move twice in a row: the second moves nothing;
+- dump size: `pg_dump -Fc -Z 6` of the copy before and after the migration,
+  to see whether compression shrinks the nightly dumps (docs/storage-plan.md
+  expects little change) and so whether off-site retention still needs a
+  decision.
 
 Only then plan the production run, with the rehearsal's timings.
 
