@@ -512,10 +512,16 @@ logs `FAIL`, pings healthchecks `/fail` and exits 1.
   must fail with AccessDenied).
 - Retention: bucket lifecycle rules, run by Oracle itself (policy
   `Allow service objectstorage-<region> to manage object-family in compartment
-  zleek_backups`): delete `daily/` objects after 30 days; delete uncommitted
-  multipart uploads after 2 days. Local disk keeps 3. The bucket is on the
-  20 GB Always Free tier: the script pushes a warning once the remote passes
-  17 GB (`ZLEEK_BACKUP_REMOTE_WARN_BYTES`); see docs/storage-plan.md.
+  zleek_backups`): delete `daily/` objects after **7 days** (30 until
+  2026-11-16) and `weekly/` objects after **35 days**; delete uncommitted
+  multipart uploads after 2 days. Each Sunday's dump is also copied to
+  `weekly/` (`ZLEEK_BACKUP_REMOTE_WEEKLY`, default: the remote with `/daily`
+  replaced by `/weekly`); a Sunday dump stays on local disk until both
+  prefixes hold it, and a failed weekly copy is a failed run. Local disk
+  keeps 3. The bucket stays under its 20 GB Always Free tier: the script
+  pushes a warning once daily/ and weekly/ together pass 15 GB
+  (`ZLEEK_BACKUP_REMOTE_WARN_BYTES`); see docs/storage-plan.md for how long
+  that holds.
 - Alerting (required since 2026-11-16): ZLEEK_BACKUP_HEALTHCHECK_URL (healthchecks.io; it also alerts when no run reports) and an ntfy push on the heartbeat's topic (zleek-ntfy.sh in ~/bin next to the script). A run is OK only if the dump is good, it reached off-site and the healthcheck URL is set; anything else is a FAIL line, a /fail ping, a push and exit 1. Warnings (dump near 5 GiB, bucket near 20 GB, an old dump kept because off-site lacks it) are a WARN line and a push; the run still succeeds.
 - Crontab: `20 3 * * * ZLEEK_BACKUP_HEALTHCHECK_URL=https://hc-ping.com/<uuid> ZLEEK_BACKUP_KEEP=3 ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
   /home/ubuntu/bin/zleek-db-backup.sh >> /home/ubuntu/backups/zleek-db/cron.log 2>&1`

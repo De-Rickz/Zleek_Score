@@ -36,7 +36,15 @@ REMOTE="${ZLEEK_BACKUP_REMOTE:-}"   # REQUIRED: rclone destination, e.g. zleek-o
 # below), which S3-compatible APIs cap at 5 GiB; the bucket sits on Oracle's
 # 20 GB Always Free tier. Warn (push, not fail) well before either.
 DUMP_WARN_BYTES="${ZLEEK_BACKUP_DUMP_WARN_BYTES:-4000000000}"      # 4 GB of the 5 GiB single-upload limit
-REMOTE_WARN_BYTES="${ZLEEK_BACKUP_REMOTE_WARN_BYTES:-17000000000}" # 17 GB of the 20 GB free tier
+REMOTE_WARN_BYTES="${ZLEEK_BACKUP_REMOTE_WARN_BYTES:-15000000000}" # 15 GB, daily/ + weekly/, of the 20 GB free tier
+# Tiered off-site retention (decided 2026-11-16): 7 daily + 4-5 weekly. Every
+# dump goes to $REMOTE (daily/); each Sunday's dump also goes to
+# $REMOTE_WEEKLY (weekly/). The bucket's lifecycle rules, run by Oracle and
+# not by these credentials (which can't delete), remove daily/ objects after
+# 7 days and weekly/ after 35. Default: REMOTE with /daily replaced by /weekly.
+REMOTE_WEEKLY="${ZLEEK_BACKUP_REMOTE_WEEKLY:-}"
+if [ -z "$REMOTE_WEEKLY" ] && [ "${REMOTE%/daily}" != "$REMOTE" ]; then REMOTE_WEEKLY="${REMOTE%/daily}/weekly"; fi
+REMOTE_ROOT="${REMOTE%/daily}"   # both prefixes, for the size check
 
 mkdir -p "$BACKUP_DIR"
 LOG="$BACKUP_DIR/backup.log"
@@ -103,16 +111,33 @@ fi
 # PUT) and --multi-thread-streams 0 keep each dump to one PUT, so the limit is
 # now 5 GiB per dump (DUMP_WARN_BYTES warns before it). Granting multipart in
 # the policy would lift it, at the cost of a broader policy.
+RCLONE_UP=(--size-only --immutable --s3-no-check-bucket --s3-upload-cutoff 5G --multi-thread-streams 0
+           --retries 3 --low-level-retries 10 --stats 0)
+is_sunday() {  # is_sunday zleek-YYYYMMDDThhmmssZ.dump: the dump's UTC date is a Sunday
+    local d="${1#zleek-}"; d="${d:0:8}"
+    [ "$(date -u -d "$d" +%u 2>/dev/null || date -u -j -f %Y%m%d "$d" +%u 2>/dev/null)" = 7 ]
+}
 offsite="off"
 if [ -n "$REMOTE" ]; then
     : > "$ERR"
-    if rclone copy "$BACKUP_DIR" "$REMOTE" --include 'zleek-*.dump' \
-            --size-only --immutable --s3-no-check-bucket \
-            --s3-upload-cutoff 5G --multi-thread-streams 0 \
-            --retries 3 --low-level-retries 10 --stats 0 2>> "$ERR"; then
+    if rclone copy "$BACKUP_DIR" "$REMOTE" --include 'zleek-*.dump' "${RCLONE_UP[@]}" 2>> "$ERR"; then
         offsite="ok"
     else
         offsite="FAIL"
+    fi
+fi
+# Weekly copy: every local Sunday dump the weekly prefix lacks (so a failed
+# Sunday copy is retried while the dump is still on local disk, KEEP nights).
+weekly="off"
+if [ "$offsite" = "ok" ] && [ -n "$REMOTE_WEEKLY" ]; then
+    sundays=()
+    for f in "$BACKUP_DIR"/zleek-*.dump; do is_sunday "$(basename "$f")" && sundays+=(--include "$(basename "$f")"); done
+    if [ "${#sundays[@]}" -eq 0 ]; then
+        weekly="none"
+    elif rclone copy "$BACKUP_DIR" "$REMOTE_WEEKLY" "${sundays[@]}" "${RCLONE_UP[@]}" 2>> "$ERR"; then
+        weekly="ok"
+    else
+        weekly="FAIL"
     fi
 fi
 
@@ -124,8 +149,13 @@ fi
 not_offsite=0
 if [ "$offsite" = "ok" ]; then
     remote_list="$(rclone lsl "$REMOTE" --include 'zleek-*.dump' 2>> "$ERR" | awk '{ print $NF, $1 }')" || remote_list=""
+    weekly_list=""
+    [ -n "$REMOTE_WEEKLY" ] && { weekly_list="$(rclone lsl "$REMOTE_WEEKLY" --include 'zleek-*.dump' 2>> "$ERR" | awk '{ print $NF, $1 }')" || weekly_list=""; }
     for old in $(ls -1 "$BACKUP_DIR"/zleek-*.dump | sort -r | tail -n +"$((KEEP + 1))"); do
-        if printf '%s\n' "$remote_list" | grep -qxF "$(basename "$old") $(stat -c %s "$old" 2>/dev/null || stat -f %z "$old")"; then
+        key="$(basename "$old") $(stat -c %s "$old" 2>/dev/null || stat -f %z "$old")"
+        # a Sunday dump must also be in weekly/ before it may go
+        if printf '%s\n' "$remote_list" | grep -qxF "$key" \
+           && { ! is_sunday "$(basename "$old")" || [ -z "$REMOTE_WEEKLY" ] || printf '%s\n' "$weekly_list" | grep -qxF "$key"; }; then
             rm -f -- "$old"
         else
             not_offsite=$((not_offsite + 1))
@@ -139,11 +169,11 @@ dump_bytes="$(stat -c %s "$FINAL" 2>/dev/null || stat -f %z "$FINAL")"
 [ "$dump_bytes" -gt "$DUMP_WARN_BYTES" ] && warn_push "dump is $dump_bytes bytes, near the 5 GiB single-upload limit for off-site copies"
 remote_bytes=""
 if [ "$offsite" = "ok" ]; then
-    remote_bytes="$(rclone size "$REMOTE" --include 'zleek-*.dump' --json 2>> "$ERR" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')"
+    remote_bytes="$(rclone size "$REMOTE_ROOT" --include 'zleek-*.dump' --json 2>> "$ERR" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')"
     [ -n "$remote_bytes" ] && [ "$remote_bytes" -gt "$REMOTE_WARN_BYTES" ] \
-        && warn_push "off-site holds $remote_bytes bytes, near the bucket's 20 GB free tier"
+        && warn_push "off-site holds $remote_bytes bytes (daily + weekly), near the bucket's 20 GB free tier"
 fi
-details="$(basename "$FINAL") size=$size seconds=$(( $(date +%s) - start )) kept=$kept disk_free=$free pg_dump_warnings=$warnings offsite=$offsite remote_bytes=${remote_bytes:-?}"
+details="$(basename "$FINAL") size=$size seconds=$(( $(date +%s) - start )) kept=$kept disk_free=$free pg_dump_warnings=$warnings offsite=$offsite weekly=$weekly remote_bytes=${remote_bytes:-?}"
 # A run only counts as OK when the dump is good AND it reached off-site AND
 # it can alert: anything less is a FAIL line, a failed healthcheck ping, a
 # push, and exit 1.
@@ -152,6 +182,12 @@ if [ -z "$REMOTE" ]; then
 fi
 if [ "$offsite" = "FAIL" ]; then
     fail "off-site copy to $REMOTE failed (local dump kept: $details)"
+fi
+if [ -z "$REMOTE_WEEKLY" ]; then
+    : > "$ERR"; fail "no weekly off-site copy: set ZLEEK_BACKUP_REMOTE_WEEKLY (or a REMOTE ending in /daily) ($details)"
+fi
+if [ "$weekly" = "FAIL" ]; then
+    fail "weekly off-site copy to $REMOTE_WEEKLY failed (local dump kept: $details)"
 fi
 if [ -z "$HEALTHCHECK_URL" ]; then
     : > "$ERR"; fail "ZLEEK_BACKUP_HEALTHCHECK_URL is not set, so a failing backup can't alert ($details)"

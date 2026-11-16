@@ -108,17 +108,29 @@ database would pass ~20 GB within ~40 days: dumps of ~2.5 GB, ~17 GB of local
 dumps on the same disk (so the real runway is shorter than the table says),
 and the bucket far over its free tier.
 
-**Off-site retention vs the 20 GB free tier (2026-11-16).** The 2026-11-16
-dump is 653 MB and the dumps grow ~60 MB a night, so 30 days of dumps (the
-bucket's lifecycle rule) is already ~20 GB and rising ~1.8 GB a week: the
-bucket will pass the free tier within days of filling its 30-day window.
-What happens then depends on the account: on a Free Tier account uploads
-beyond 20 GB are refused (the script's FAIL and push now say so); on a paid
-account the excess is billed (Standard storage is about $0.03/GB-month, i.e.
-cents). Options, to decide: (1) cut the lifecycle rule to 14 days (~9-10 GB
-now); (2) keep 7-14 daily plus one dump a week for 8 weeks under a `weekly/`
-prefix with its own lifecycle rule (the script copies Sunday's dump there);
-(3) pay for the excess. The script warns when the bucket passes 17 GB.
+**Off-site retention vs the 20 GB free tier (decided 2026-11-16): 7 daily + 4
+weekly.** 30 days of dumps had reached ~20 GB (653 MB on 2026-11-16, growing
+~60 MB a night). Now: every dump goes to `daily/`, each Sunday's dump also to
+`weekly/` (zleek-db-backup.sh), and the bucket's lifecycle rules (run by
+Oracle, so the backup credentials still can't delete) remove `daily/` objects
+after 7 days and `weekly/` after 35, i.e. 7 daily plus 4-5 weekly dumps,
+about 12 in all. Target: under 20 GB whatever the account type; the script
+pushes a warning above 15 GB (`ZLEEK_BACKUP_REMOTE_WARN_BYTES`, daily/ and
+weekly/ together).
+
+How long that holds: with ~12 dumps, the bucket is about 12 x (newest dump)
+minus ~6 GB (the weekly ones are older and smaller), so it stays under 20 GB
+while the newest dump is under ~2.2 GB and passes the 15 GB warning at
+~1.8 GB. At ~60 MB a night that is ~19 days to the warning (~2026-12-05) and
+~25 days to 20 GB (~2026-12-11). Tiering alone buys about a month; what keeps
+it under 20 GB after that is smaller dumps. The storage step's retention
+(features_5m 30 days, signals_history 90, ob_snapshots 30) only bites once
+data is older than that, so revisit by **2026-12-01** with the measured dump
+size: fewer weekly dumps, leaving the recomputable features_5m out of the
+dump, or paying for the excess. The account is on Oracle's **Free Tier**
+(confirmed by the human 2026-11-16), so an upload that would take the bucket
+past 20 GB is refused, which the script reports as a failed run; moving to Pay
+As You Go is an option the human is open to once the storage step is done.
 
 **Does trades_archive compression shrink the dumps?** Not much, probably.
 pg_dump writes compressed chunks in their compressed form, and `-Fc -Z 6`
