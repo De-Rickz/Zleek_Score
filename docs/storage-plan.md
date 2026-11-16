@@ -127,7 +127,10 @@ it under 20 GB after that is smaller dumps. The storage step's retention
 (features_5m 30 days, signals_history 90, ob_snapshots 30) only bites once
 data is older than that, so revisit by **2026-12-01** with the measured dump
 size: fewer weekly dumps, leaving the recomputable features_5m out of the
-dump, or paying for the excess.
+dump, or paying for the excess. The account is on Oracle's **Free Tier**
+(confirmed by the human 2026-11-16), so an upload that would take the bucket
+past 20 GB is refused, which the script reports as a failed run; moving to Pay
+As You Go is an option the human is open to once the storage step is done.
 
 **Does trades_archive compression shrink the dumps?** Not much, probably.
 pg_dump writes compressed chunks in their compressed form, and `-Fc -Z 6`
