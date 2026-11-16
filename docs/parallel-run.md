@@ -473,7 +473,7 @@ Production's database is the only copy once the Mac is off.
 **Nightly on-disk dump** (installed as `~/bin/zleek-db-backup.sh`, source in
 `infra/backup/zleek-db-backup.sh`): `pg_dump -Fc` (compressed custom format)
 inside the `zleek_db` container, written to `~/backups/zleek-db/`, checked
-with `pg_restore --list` before it's kept, newest 3 kept (7 until 2026-11-16, cut to save disk; ZLEEK_BACKUP_KEEP=3 in the crontab line). One line per run in
+with `pg_restore --list` before it's kept, newest 3 kept (`ZLEEK_BACKUP_KEEP=3`; 7 until 2026-11-16), and an older dump is deleted only once the off-site remote holds it at the same size (since 2026-11-16: before that, retention ran before the copy, and the 2026-11-09 dump was deleted while off-site lacked it; see the incident below). One line per run in
 `~/backups/zleek-db/backup.log` (`OK …` / `FAIL …` / `SKIP …`). A failed run
 removes its partial file and never deletes older dumps.
 
@@ -493,7 +493,13 @@ From 2026-11: scripted and monthly, `infra/backup/zleek-restore-test.sh`
 
 **Off-instance copy** (installed 2026-11-02): with `ZLEEK_BACKUP_REMOTE` set,
 each run copies every local dump the bucket doesn't have yet with `rclone copy
---size-only --immutable`, so a failed upload is retried the next night. The
+--size-only --immutable --s3-upload-cutoff 5G --multi-thread-streams 0`, so a
+failed upload is retried the next night. **One PUT per dump, 5 GiB ceiling:**
+the bucket policy refuses multipart uploads (CreateMultipartUpload, which OCI
+reports as `NoSuchBucket`), so the script keeps every dump to a single request;
+S3-compatible APIs cap one PUT at 5 GiB. The script pushes a warning once a
+dump passes 4 GB (`ZLEEK_BACKUP_DUMP_WARN_BYTES`); before 5 GiB either allow
+multipart in the policy or split the dump. The
 log line ends `offsite=ok|FAIL|off`; a failed upload keeps the local dump,
 logs `FAIL`, pings healthchecks `/fail` and exits 1.
 - Oracle Object Storage, compartment `zleek_backups`, private bucket
@@ -507,11 +513,31 @@ logs `FAIL`, pings healthchecks `/fail` and exits 1.
 - Retention: bucket lifecycle rules, run by Oracle itself (policy
   `Allow service objectstorage-<region> to manage object-family in compartment
   zleek_backups`): delete `daily/` objects after 30 days; delete uncommitted
-  multipart uploads after 2 days. Local disk keeps 3 (7 until 2026-11-16).
-- Crontab: `20 3 * * * ZLEEK_BACKUP_KEEP=3 ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
+  multipart uploads after 2 days. Local disk keeps 3. The bucket is on the
+  20 GB Always Free tier: the script pushes a warning once the remote passes
+  17 GB (`ZLEEK_BACKUP_REMOTE_WARN_BYTES`); see docs/storage-plan.md.
+- Alerting (required since 2026-11-16): ZLEEK_BACKUP_HEALTHCHECK_URL (healthchecks.io; it also alerts when no run reports) and an ntfy push on the heartbeat's topic (zleek-ntfy.sh in ~/bin next to the script). A run is OK only if the dump is good, it reached off-site and the healthcheck URL is set; anything else is a FAIL line, a /fail ping, a push and exit 1. Warnings (dump near 5 GiB, bucket near 20 GB, an old dump kept because off-site lacks it) are a WARN line and a push; the run still succeeds.
+- Crontab: `20 3 * * * ZLEEK_BACKUP_HEALTHCHECK_URL=https://hc-ping.com/<uuid> ZLEEK_BACKUP_KEEP=3 ZLEEK_BACKUP_REMOTE=zleek-offsite:zleek_db_backups/daily
   /home/ubuntu/bin/zleek-db-backup.sh >> /home/ubuntu/backups/zleek-db/cron.log 2>&1`
 - Restore from the bucket: `rclone copy zleek-offsite:zleek_db_backups/daily/<dump>
   /tmp/restore/`, then the throwaway-container restore above.
+
+**Incident, 2026-11-09 to 11-16: off-site copies failed silently.** The dumps
+passed 200 MB around 2026-11-09, so rclone switched to multipart upload (two
+separate triggers: the S3 upload cutoff, 200 MiB, and multi-thread copy, 256
+MiB), which the bucket policy refuses. Every off-site copy failed from then on;
+the runs logged FAIL and exited 1, but nothing alerted, because the healthcheck
+URL had never been set. Retention also ran before the copy, so it deleted the
+2026-11-09 dump while off-site lacked it: there is no copy of that night (later
+dumps cover its data). Found by the human on 2026-11-16, who re-uploaded 10-16
+Nov with single-request uploads (`rclone check --size-only --one-way`: 0
+differences), set `upload_cutoff = 5G` in rclone.conf and
+`RCLONE_MULTI_THREAD_STREAMS=0` in the crontab, and cut local retention to 3
+(manual run 18:06 UTC: 653M, offsite=ok). Then fixed in git
+(infra/backup/zleek-db-backup.sh, 2026-11-16): the two rclone flags on the copy
+itself, retention only after a successful copy and only for dumps the remote
+holds at the same size, the healthcheck required, and an ntfy push on every
+failure and warning.
 
 pg_dump warnings: the log's `WARN …` line holds the text. TimescaleDB's
 self-referencing catalog tables make pg_dump warn about circular foreign keys;

@@ -15,6 +15,13 @@
 # still going; 1 on failure (the failed run's partial file is removed, and
 # no older dump is deleted). A failed off-site copy also exits 1, but keeps
 # the new local dump, and the next run retries every dump the remote lacks.
+#
+# Every failure alerts on two channels (added 2026-11-16, after off-site
+# copies failed unnoticed from 2026-11-09 to 11-16): healthchecks.io
+# (ZLEEK_BACKUP_HEALTHCHECK_URL, now REQUIRED: without it the dump still runs
+# but the run counts as failed) and an ntfy push on the heartbeat's topic
+# (zleek-ntfy.sh, installed next to this script). healthchecks.io also alerts
+# when no run reports at all.
 set -euo pipefail
 umask 077   # dumps hold all production data: readable by this user only
 
@@ -23,13 +30,27 @@ DB_NAME="${ZLEEK_DB_NAME:-postgres}"
 DB_USER="${ZLEEK_DB_USER:-postgres}"
 BACKUP_DIR="${ZLEEK_BACKUP_DIR:-$HOME/backups/zleek-db}"
 KEEP="${ZLEEK_BACKUP_KEEP:-7}"
-HEALTHCHECK_URL="${ZLEEK_BACKUP_HEALTHCHECK_URL:-}"   # optional: a healthchecks.io check for this job
-REMOTE="${ZLEEK_BACKUP_REMOTE:-}"   # optional: rclone destination, e.g. zleek-offsite:zleek_db_backups/daily
+HEALTHCHECK_URL="${ZLEEK_BACKUP_HEALTHCHECK_URL:-}"   # REQUIRED: the healthchecks.io check for this job
+REMOTE="${ZLEEK_BACKUP_REMOTE:-}"   # REQUIRED: rclone destination, e.g. zleek-offsite:zleek_db_backups/daily
+# Off-site ceilings: one object is uploaded in a single request (see the copy
+# below), which S3-compatible APIs cap at 5 GiB; the bucket sits on Oracle's
+# 20 GB Always Free tier. Warn (push, not fail) well before either.
+DUMP_WARN_BYTES="${ZLEEK_BACKUP_DUMP_WARN_BYTES:-4000000000}"      # 4 GB of the 5 GiB single-upload limit
+REMOTE_WARN_BYTES="${ZLEEK_BACKUP_REMOTE_WARN_BYTES:-17000000000}" # 17 GB of the 20 GB free tier
 
 mkdir -p "$BACKUP_DIR"
 LOG="$BACKUP_DIR/backup.log"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG"; }
 hc() { if [ -n "$HEALTHCHECK_URL" ]; then curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$2" "$HEALTHCHECK_URL$1" || true; fi; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../ops/zleek-ntfy.sh
+if [ -r "${ZLEEK_NTFY_HELPER:-$SCRIPT_DIR/zleek-ntfy.sh}" ]; then
+    . "${ZLEEK_NTFY_HELPER:-$SCRIPT_DIR/zleek-ntfy.sh}"
+else
+    zleek_ntfy() { echo "zleek_ntfy: helper not found next to $0; not sent: $3" >&2; return 1; }
+fi
+push() { zleek_ntfy urgent rotating_light "Backup FAILED: $1" > /dev/null 2>&1 || log "WARN ntfy push failed"; }
+warn_push() { log "WARN $1"; zleek_ntfy high warning "Backup warning: $1" > /dev/null 2>&1 || log "WARN ntfy push failed"; }
 
 # One run at a time (a slow dump must not overlap the next night's).
 exec 9>"$BACKUP_DIR/.lock"
@@ -46,6 +67,7 @@ fail() {
     detail="$(tail -c 400 "$ERR" 2>/dev/null | tr '\n' ' ')"
     log "FAIL $1${detail:+ | $detail}"
     hc /fail "FAIL $1 $detail"
+    push "$1${detail:+ | $detail}"
     exit 1
 }
 
@@ -61,13 +83,7 @@ docker exec -i "$CONTAINER" pg_restore --list < "$TMP" > /dev/null 2>> "$ERR" \
 
 mv "$TMP" "$FINAL"
 
-# Retention: keep the newest $KEEP dumps (by the UTC timestamp in the name).
-# Only reached after a good dump, so a failing job never deletes old ones.
-ls -1 "$BACKUP_DIR"/zleek-*.dump | sort -r | tail -n +"$((KEEP + 1))" | xargs -r rm -f --
-
 size="$(du -h "$FINAL" | cut -f1)"
-kept="$(ls -1 "$BACKUP_DIR"/zleek-*.dump | wc -l | tr -d ' ')"
-free="$(df -Ph "$BACKUP_DIR" | awk 'NR == 2 { print $4 }')"
 warnings="$(grep -ci 'warning' "$ERR" || true)"   # TimescaleDB dumps print harmless circular-FK warnings
 if [ "$warnings" -gt 0 ]; then
     log "WARN $(grep -i -A2 'warning' "$ERR" | head -c 400 | tr '\n' ' ')"
@@ -78,11 +94,21 @@ fi
 # written, so --size-only is enough, and --immutable refuses to overwrite a
 # differing object instead of replacing it. The bucket's credentials can't
 # delete or overwrite; the bucket's own lifecycle rule handles retention.
+#
+# Single-request uploads only (2026-11-16): above rclone's 200 MiB S3 upload
+# cutoff, and above 256 MiB for multi-thread copy, rclone switches to
+# multipart upload, and the bucket policy refuses CreateMultipartUpload (OCI
+# answers NoSuchBucket). Dumps passed 200 MB on 2026-11-09 and every copy
+# failed from then until 11-16. --s3-upload-cutoff 5G (the S3 maximum for one
+# PUT) and --multi-thread-streams 0 keep each dump to one PUT, so the limit is
+# now 5 GiB per dump (DUMP_WARN_BYTES warns before it). Granting multipart in
+# the policy would lift it, at the cost of a broader policy.
 offsite="off"
 if [ -n "$REMOTE" ]; then
     : > "$ERR"
     if rclone copy "$BACKUP_DIR" "$REMOTE" --include 'zleek-*.dump' \
             --size-only --immutable --s3-no-check-bucket \
+            --s3-upload-cutoff 5G --multi-thread-streams 0 \
             --retries 3 --low-level-retries 10 --stats 0 2>> "$ERR"; then
         offsite="ok"
     else
@@ -90,9 +116,45 @@ if [ -n "$REMOTE" ]; then
     fi
 fi
 
-line="OK $(basename "$FINAL") size=$size seconds=$(( $(date +%s) - start )) kept=$kept disk_free=$free pg_dump_warnings=$warnings offsite=$offsite"
-log "$line"
-if [ "$offsite" = "FAIL" ]; then
-    fail "off-site copy to $REMOTE failed (local dump kept)"
+# Retention: keep the newest $KEEP dumps (by the UTC timestamp in the name),
+# but delete an older one ONLY if the remote holds it at the same size, so a
+# dump that never reached off-site is never deleted (until 2026-11-16 retention
+# ran before the copy and deleted 2026-11-09's dump, which off-site lacked).
+# Only reached after a good dump and a successful copy.
+not_offsite=0
+if [ "$offsite" = "ok" ]; then
+    remote_list="$(rclone lsl "$REMOTE" --include 'zleek-*.dump' 2>> "$ERR" | awk '{ print $NF, $1 }')" || remote_list=""
+    for old in $(ls -1 "$BACKUP_DIR"/zleek-*.dump | sort -r | tail -n +"$((KEEP + 1))"); do
+        if printf '%s\n' "$remote_list" | grep -qxF "$(basename "$old") $(stat -c %s "$old" 2>/dev/null || stat -f %z "$old")"; then
+            rm -f -- "$old"
+        else
+            not_offsite=$((not_offsite + 1))
+        fi
+    done
 fi
-hc "" "$line"
+kept="$(ls -1 "$BACKUP_DIR"/zleek-*.dump | wc -l | tr -d ' ')"
+free="$(df -Ph "$BACKUP_DIR" | awk 'NR == 2 { print $4 }')"
+[ "$not_offsite" -gt 0 ] && warn_push "$not_offsite dump(s) past retention kept locally: not found off-site at the same size"
+dump_bytes="$(stat -c %s "$FINAL" 2>/dev/null || stat -f %z "$FINAL")"
+[ "$dump_bytes" -gt "$DUMP_WARN_BYTES" ] && warn_push "dump is $dump_bytes bytes, near the 5 GiB single-upload limit for off-site copies"
+remote_bytes=""
+if [ "$offsite" = "ok" ]; then
+    remote_bytes="$(rclone size "$REMOTE" --include 'zleek-*.dump' --json 2>> "$ERR" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')"
+    [ -n "$remote_bytes" ] && [ "$remote_bytes" -gt "$REMOTE_WARN_BYTES" ] \
+        && warn_push "off-site holds $remote_bytes bytes, near the bucket's 20 GB free tier"
+fi
+details="$(basename "$FINAL") size=$size seconds=$(( $(date +%s) - start )) kept=$kept disk_free=$free pg_dump_warnings=$warnings offsite=$offsite remote_bytes=${remote_bytes:-?}"
+# A run only counts as OK when the dump is good AND it reached off-site AND
+# it can alert: anything less is a FAIL line, a failed healthcheck ping, a
+# push, and exit 1.
+if [ -z "$REMOTE" ]; then
+    : > "$ERR"; fail "no off-site copy: ZLEEK_BACKUP_REMOTE is not set (local dump kept: $details)"
+fi
+if [ "$offsite" = "FAIL" ]; then
+    fail "off-site copy to $REMOTE failed (local dump kept: $details)"
+fi
+if [ -z "$HEALTHCHECK_URL" ]; then
+    : > "$ERR"; fail "ZLEEK_BACKUP_HEALTHCHECK_URL is not set, so a failing backup can't alert ($details)"
+fi
+log "OK $details"
+hc "" "OK $details"
