@@ -1,14 +1,15 @@
 # Zleek Score: rules for Claude Code
 
 ## Non-negotiables
-- Never restart, kill or reload the worker; never run docker, launchctl or git push. The human does these.
+- Never restart, kill or reload the worker; never run docker against production, or launchctl. The human does these.
+- Git: only the human merges, and nobody pushes to main (a ruleset on main requires a pull request and blocks force pushes and deletions). In an interactive session the human pushes. Scheduled cloud agents working TASKS.md push their own `task/*` branch and open a pull request; they never push to main, merge, force-push or delete branches, and they follow TASKS.md's rules (at most 3 open pull requests, never production, never ROADMAP.md).
 - Database: read-only SELECTs via zleek_web only. Any write goes in a script under apps/worker/scripts/ for the human to run.
 - Repair scripts must be idempotent and safe to run before or after a worker restart. Recompute from stored source data (raw), never from the current value.
 - Never commit secrets. .env files stay untracked.
 - Stop and report if the brief contradicts what you find in the code or data.
 
 ## Workflow
-- One change at a time: show the diff, explain in 2-3 bullets, wait for approval.
+- One change at a time: show the diff, explain in 2-3 bullets, wait for approval. For a scheduled agent the pull request is that step: the diff, the bullets and the verification go in its description, and the human's merge is the approval.
 - Every fix adds or updates a test or an acceptance query that would have caught the bug.
 - After each task, update infra/TODO.md.
 - Never use `git checkout --`, `git restore` or `git reset --hard` on files with uncommitted work: they discard it. Commit (or stash) before making a temporary edit, then revert the temporary edit with a normal commit or a reverse patch, and confirm `git diff` is empty afterwards. (2026-11-03: a `git checkout -- app/page.tsx` meant to undo a one-line screenshot edit would have thrown away a whole uncommitted feature.)
