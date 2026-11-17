@@ -179,6 +179,24 @@ container (the production version) and run the migration exactly as above:
 
 Only then plan the production run, with the rehearsal's timings.
 
+## Known TimescaleDB 2.31.0 bug: no tie-breaker with ORDER BY ... LIMIT on trades_all
+
+Found by the rehearsal on the 2026-11-17 production dump. A query on
+`trades_all` with `ORDER BY ts DESC, <another column> ... LIMIT n` fails with
+`ERROR: retrieved too many tuples in a bounded sort` once `trades_archive` has
+statistics (`ANALYZE`, which autovacuum runs): the planner puts an Incremental
+Sort (presorted on ts) over a Merge Append of trades and the archive's
+ChunkAppend, the ChunkAppend's per-chunk Sorts are bounded by the LIMIT, and
+tied timestamps make the Incremental Sort pull past that bound. Not affected:
+`ORDER BY ts DESC LIMIT n` (the web's recent-trades query), the same query on
+`trades_archive` alone, and ordered aggregates (`array_agg(... ORDER BY ts, id)`
+in the bars rebuild). Reproduced on 8 of 8 archived markets after `ANALYZE
+trades_archive`, 0 before. So: keep ORDER BY ... LIMIT on trades_all to `ts`
+alone (a comment in apps/web/lib/queries.ts says so); for a deterministic order
+among tied trades, select everything at or after the n-th newest ts and order
+inside an aggregate or in the application. Re-check after any TimescaleDB
+upgrade, and consider reporting it upstream (timescale/timescaledb).
+
 ## Websocket vs Data API timestamps
 
 Recorded for anything that matches trades by time: the websocket stores its

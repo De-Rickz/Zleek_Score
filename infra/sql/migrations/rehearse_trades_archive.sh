@@ -92,8 +92,15 @@ fingerprint() {  # fingerprint TABLE: one line that changes if any reader's answ
                     (array_agg(price ORDER BY ts DESC, id DESC))[1] c, sum(size_usd) v, count(*) n
              FROM $t WHERE ts >= '$DAY' AND ts < '$DAY'::date + 1 GROUP BY 1, 2) s") "
     for m in $SAMPLE_MARKETS; do
-        # ties broken by id: trades sharing a timestamp (same second) otherwise come back in plan-dependent order
-        out+="$m=$(q -c "SELECT md5(string_agg(id::text || ':' || ts::text || ':' || price::text || ':' || size_usd::text, ',' ORDER BY ts DESC, id DESC)) FROM (SELECT id, ts, price, size_usd FROM $t WHERE market_id = '$m' ORDER BY ts DESC, id DESC LIMIT 50) s") "
+        # The market's newest 50 trades, plus any that tie with the 50th (trades
+        # sharing a second come back in plan-dependent order), ordered by
+        # (ts, id) only inside the aggregate. Deliberately NOT
+        # "ORDER BY ts DESC, id DESC LIMIT 50" on trades_all: that pattern hits
+        # a TimescaleDB 2.31.0 bug ("retrieved too many tuples in a bounded
+        # sort") once trades_archive is analyzed (docs/trades-archive-design.md).
+        out+="$m=$(q -c "SELECT md5(string_agg(id::text || ':' || ts::text || ':' || price::text || ':' || size_usd::text, ',' ORDER BY ts DESC, id DESC))
+             FROM $t WHERE market_id = '$m'
+               AND ts >= (SELECT min(ts) FROM (SELECT ts FROM $t WHERE market_id = '$m' ORDER BY ts DESC LIMIT 50) x)") "
     done
     printf '%s' "$out"
 }
@@ -133,6 +140,7 @@ say "   compression: $(q -c "SELECT pg_size_pretty(sum(before_compression_total_
 
 # --- 6. verify: identical answers through trades_all ---
 say ""
+qq -c "ANALYZE trades_archive"   # as autovacuum will on production: the plans below then match it
 AFTER="$(fingerprint trades_all)"
 check "every reader's answer identical (trades -> trades_all)" "$BEFORE" "$AFTER"
 check "no row older than the cutoff left in trades" "0" "$(q -c "SELECT count(*) FROM trades WHERE ts < archive_cutoff()")"
@@ -144,6 +152,7 @@ time_query "dashboard newest trade (new query)" "SELECT s.market_id, coalesce((S
 time_query "recent 50 trades, busy market (trades_all)" "SELECT ts, price FROM trades_all WHERE market_id = '$BUSY' ORDER BY ts DESC LIMIT 50"
 OLDM="$(echo "$SAMPLE_MARKETS" | awk '{print $1}')"
 time_query "recent 50 trades, archived market" "SELECT ts, price FROM trades_all WHERE market_id = '$OLDM' ORDER BY ts DESC LIMIT 50"
+check "web recent-trades query (ORDER BY ts DESC LIMIT 50) works on every sample market" "0" "$(for m in $SAMPLE_MARKETS; do q -c "SELECT count(*) FROM (SELECT ts, price, size_usd, side FROM trades_all WHERE market_id = '$m' ORDER BY ts DESC LIMIT 50) s" > /dev/null 2>&1 || echo x; done | grep -c x)"
 time_query "bars rebuild select, archived day" "SELECT market_id, date_trunc('minute', ts), count(*) FROM trades_all WHERE ts >= '$DAY' AND ts < '$DAY'::date + 1 GROUP BY 1, 2"
 
 # --- 7. dedupe on real archived trades (compressed chunks) ---

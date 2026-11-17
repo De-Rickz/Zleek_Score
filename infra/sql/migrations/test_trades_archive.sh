@@ -98,7 +98,9 @@ check "nightly move: total unchanged" "$total" "SELECT count(*) FROM trades_all"
 check "nightly move: no tx_hash in both tables" "0" "SELECT count(*) FROM trades t JOIN trades_archive a USING (tx_hash)"
 check "ids unique across both tables" "$total" "SELECT count(DISTINCT id) FROM trades_all"
 
-# Reads the dashboard and bars use.
+# Reads the dashboard and bars use, with the archive analyzed (as autovacuum
+# will on production): the plans then match production's.
+q -c "ANALYZE trades_archive" > /dev/null
 check "latest trade per market via trades_all" "2" \
   "SELECT count(*) FROM (SELECT market_id, max(ts) FROM trades_all GROUP BY 1 HAVING max(ts) > now() - interval '1 day') s"
 check "a market's newest trades span both tables" "30" \

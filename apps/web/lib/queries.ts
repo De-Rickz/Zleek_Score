@@ -83,6 +83,9 @@ export async function getRecentTrades(marketId: string, limit = 50) {
            price::float8 AS price, size_usd::float8 AS size_usd, side
     FROM trades_all WHERE market_id = ${marketId}
     ORDER BY ts DESC LIMIT ${limit}`)
+  // Keep the ORDER BY to ts alone: "ORDER BY ts DESC, id DESC LIMIT n" on
+  // trades_all hits a TimescaleDB 2.31.0 bug ("retrieved too many tuples in a
+  // bounded sort") once trades_archive is analyzed (docs/trades-archive-design.md).
 }
 
 export type TracePoint = { t: number; close: number }
