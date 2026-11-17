@@ -25,7 +25,9 @@ WITH s AS (
           WHERE b.market_id = s.market_id AND b.bucket > now() - interval '240 minutes') AS bars_in_window
   FROM signals_latest s
   JOIN markets m ON m.id = s.market_id
-  LEFT JOIN LATERAL (SELECT max(ts) AS ts FROM trades t WHERE t.market_id = s.market_id) lt ON true
+  LEFT JOIN LATERAL (SELECT coalesce(
+      (SELECT max(ts) FROM trades t WHERE t.market_id = s.market_id),
+      (SELECT max(ts) FROM trades_archive a WHERE a.market_id = s.market_id)) AS ts) lt ON true
   LEFT JOIN LATERAL (SELECT max(bucket) AS bucket FROM bars_1m b WHERE b.market_id = s.market_id) lb ON true
 ),
 k AS (

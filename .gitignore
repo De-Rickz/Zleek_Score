@@ -55,3 +55,4 @@ redis_data/
 # logs and local tool settings
 *.log
 .claude/settings.local.json
+rehearsal-*.txt

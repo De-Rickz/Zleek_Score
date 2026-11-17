@@ -19,6 +19,14 @@ apps/web/.env.local); each sends its own alert when stale:
            at most a day (cheap with the trades(ts) index); no backfill trade
            in that day reports as none.
 
+  archive  once trades_archive exists (ROADMAP phase 4 storage,
+           docs/trades-archive-design.md): the nightly move keeps trades to
+           the last 4-5 UTC days, so a row in trades older than 5 days means
+           the move job isn't running; and no tx_hash may be in both tables
+           near the cutoff, nor twice in the newest archived day (the
+           duplicate guard: a mismatch means a write slipped past
+           zleek_store_trade's dedupe). Not checked (nor logged) before the
+           migration. Each query is indexed and bounded to ~1 day of rows.
 After the Mac sleeps both checks fail together on wake; that is the worker
 being suspended, not a websocket fault.
 
@@ -77,9 +85,30 @@ async def newest_timestamps():
             "SELECT MAX(ts) FROM trades WHERE jsonb_typeof(raw) = 'string'")
         backfill = await conn.fetchval(
             "SELECT MAX(ts) FROM trades WHERE ts > now() - interval '1 day' AND jsonb_typeof(raw) = 'object'")
-        return signals, trades, backfill
+        return signals, trades, backfill, await archive_state(conn)
     finally:
         await conn.close()
+
+
+async def archive_state(conn):
+    """None before the migration; else (oldest ts in trades, tx_hashes in both
+    tables near the cutoff, duplicate tx_hashes in the newest archived day)."""
+    if not await conn.fetchval("SELECT to_regclass('public.trades_archive') IS NOT NULL"):
+        return None
+    oldest = await conn.fetchval("SELECT min(ts) FROM trades")
+    # Where both can happen: the same trade on both sides of the cutoff (its
+    # websocket and Data API timestamps differ by up to ~5 s), so an hour
+    # either side is enough, and keeps the query small.
+    both = await conn.fetchval(
+        """SELECT count(*) FROM trades t
+           WHERE t.ts >= archive_cutoff() - interval '1 hour' AND t.ts < archive_cutoff() + interval '1 hour'
+             AND EXISTS (SELECT 1 FROM trades_archive a WHERE a.tx_hash = t.tx_hash
+                         AND a.ts >= archive_cutoff() - interval '1 hour')""")
+    dupes = await conn.fetchval(
+        """SELECT count(*) - count(DISTINCT tx_hash) FROM trades_archive
+           WHERE ts >= archive_cutoff() - interval '1 day' AND tx_hash IS NOT NULL""")
+    return oldest, both, dupes
+
 
 
 def _http(url, data=None, headers=None):
@@ -140,6 +169,27 @@ CHECKS = {
 }
 
 
+ARCHIVE_MAX_AGE = timedelta(days=5)   # trades holds 4-5 UTC days when the nightly move runs
+
+
+def archive_problems(state, now):
+    """Alert messages for the archive check (empty = fine), and its log part."""
+    if state is None:
+        return [], ""   # before the migration: nothing to check, nothing logged
+    oldest, both, dupes = state
+    problems = []
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if oldest is not None and oldest < day_start - ARCHIVE_MAX_AGE:
+        problems.append(f"trades still holds rows from {oldest:%Y-%m-%d}: the nightly archive move "
+                        "(archive_trades_job) may not be running")
+    if both:
+        problems.append(f"{both} trade(s) are in both trades and trades_archive near the cutoff")
+    if dupes:
+        problems.append(f"{dupes} duplicate tx_hash(es) in the newest archived day")
+    age = "-" if oldest is None else f"{(now - oldest).days}d"
+    return problems, f"archive={'!' if problems else ''}oldest{age},both{both},dupes{dupes}"
+
+
 def stale_after(name):
     """Threshold per check; read at run time so tests can override it."""
     return BACKFILL_STALE_AFTER if name == "backfill" else STALE_AFTER
@@ -147,7 +197,9 @@ def stale_after(name):
 
 def main():
     try:
-        newest = dict(zip(CHECKS, asyncio.run(newest_timestamps())))
+        values = asyncio.run(newest_timestamps())
+        newest = dict(zip(CHECKS, values[:len(CHECKS)]))
+        archive = values[len(CHECKS)] if len(values) > len(CHECKS) else None
     except Exception as e:
         line = log("FAIL", f"db_error={type(e).__name__}")
         notify(f"Zleek Score heartbeat can't reach the database ({type(e).__name__})")
@@ -171,7 +223,13 @@ def main():
             failed = True
         else:
             parts.append(f"{name}={gap_min}m")
-    # e.g. "OK signals=3m trades=0m backfill=4m" or "FAIL signals=3m trades=0m backfill=160m!"
+    problems, part = archive_problems(archive, now)
+    if part:
+        parts.append(part)
+    for p in problems:
+        notify(f"Zleek Score archive: {p}")
+        failed = True
+    # e.g. "OK signals=3m trades=0m backfill=4m archive=oldest4d,both0,dupes0"
     line = log("FAIL" if failed else "OK", " ".join(parts))
     ping_healthcheck(not failed, line)
 

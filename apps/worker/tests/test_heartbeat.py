@@ -83,7 +83,24 @@ def run(env, stale_after=None, platform=None, ts=FRESH):
     return out.getvalue(), err.getvalue(), list(REQUESTS), osascript_calls
 
 
+def test_archive_problems():
+    now = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+    assert hb.archive_problems(None, now) == ([], "")
+    ok, part = hb.archive_problems((datetime(2026, 11, 15, 0, 0, tzinfo=timezone.utc), 0, 0), now)
+    assert ok == [] and part == "archive=oldest5d,both0,dupes0", part      # day_start - 5 days: still fine
+    late, part = hb.archive_problems((datetime(2026, 11, 14, 23, 0, tzinfo=timezone.utc), 0, 0), now)
+    assert len(late) == 1 and "archive_trades_job" in late[0] and part.startswith("archive=!")
+    both, _ = hb.archive_problems((datetime(2026, 11, 16, tzinfo=timezone.utc), 3, 0), now)
+    assert len(both) == 1 and "both trades and trades_archive" in both[0]
+    dupes, _ = hb.archive_problems((datetime(2026, 11, 16, tzinfo=timezone.utc), 0, 2), now)
+    assert len(dupes) == 1 and "duplicate" in dupes[0]
+    empty, part = hb.archive_problems((None, 0, 0), now)
+    assert empty == [] and part == "archive=oldest-,both0,dupes0"
+
+
 def main():
+    test_archive_problems()
+    print("ok test_archive_problems")
     server = HTTPServer(("127.0.0.1", 0), Recorder)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"

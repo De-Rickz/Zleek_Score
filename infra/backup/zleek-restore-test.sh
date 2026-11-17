@@ -77,15 +77,23 @@ docker exec -i "$TEST_CONTAINER" pg_restore -U postgres -d restored --no-owner -
 rm -f "$ERR"
 q -d restored -c 'SELECT timescaledb_post_restore()' >/dev/null || fail "timescaledb_post_restore failed"
 
-trades="$(q -d restored -c 'SELECT count(*) FROM trades')"
+# All trades: trades_all (trades + trades_archive) once the archive exists
+# (ROADMAP phase 4 storage, docs/trades-archive-design.md), else trades.
+# Copy and production are checked separately, so a dump from before the
+# migration still compares correctly with production after it.
+T_COPY="$(q -d restored -c "SELECT CASE WHEN to_regclass('public.trades_all') IS NULL THEN 'trades' ELSE 'trades_all' END")"
+T_PROD="$(docker exec -e PGOPTIONS='-c default_transaction_read_only=on' "$DB_CONTAINER" \
+          psql -U zleek_web -d postgres -X -tA -c "SELECT CASE WHEN to_regclass('public.trades_all') IS NULL THEN 'trades' ELSE 'trades_all' END")" \
+    || fail "could not read production's schema (read-only)"
+trades="$(q -d restored -c "SELECT count(*) FROM $T_COPY")"
 bars="$(q -d restored -c 'SELECT count(*) FROM bars_1m')"
 markets="$(q -d restored -c 'SELECT count(*) FROM markets')"
 [ "$trades" -gt 0 ] && [ "$bars" -gt 0 ] && [ "$markets" -gt 0 ] \
     || fail "empty tables in the copy: trades=$trades bars_1m=$bars markets=$markets"
 
-newest="$(q -d restored -c "SELECT to_char(max(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') FROM trades")"
+newest="$(q -d restored -c "SELECT to_char(max(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') FROM trades")"   # newest rows are always in trades
 prod="$(docker exec -e PGOPTIONS='-c default_transaction_read_only=on' "$DB_CONTAINER" \
-        psql -U zleek_web -d postgres -X -tA -c "SELECT count(*) FROM trades WHERE ts <= '$newest+00'")" \
+        psql -U zleek_web -d postgres -X -tA -c "SELECT count(*) FROM $T_PROD WHERE ts <= '$newest+00'")" \
     || fail "could not count production trades (read-only)"
 # copy must hold at least 99.9% of production's trades up to its newest trade
 [ $(( trades * 1000 )) -ge $(( prod * 999 )) ] && [ "$trades" -le "$prod" ] \
@@ -96,4 +104,4 @@ labels_wrong="$(q -d restored -c "SELECT count(*) FROM markets WHERE jsonb_typeo
 q -d restored < "$REPO/apps/worker/scripts/acceptance_price_orientation.sql" >/dev/null \
     || fail "acceptance_price_orientation.sql did not run on the copy"
 
-log "OK $(basename "$DUMP") image=$IMAGE trades=$trades (production $prod up to $newest UTC) bars_1m=$bars markets=$markets seconds=$(( $(date +%s) - start ))"
+log "OK $(basename "$DUMP") image=$IMAGE trades=$trades ($T_COPY) (production $prod up to $newest UTC) bars_1m=$bars markets=$markets seconds=$(( $(date +%s) - start ))"

@@ -84,9 +84,11 @@ class FakeDB:
         self.during_batch = None  # async hook run in the middle of a batch insert
 
     def apply(self, query, row):
-        if "market_id" in query and row[0] == "BAD":
+        # REST_QUERY calls zleek_store_trade (the trades_archive step); the
+        # websocket and book queries are plain INSERTs naming market_id.
+        if ("market_id" in query or "zleek_store_trade(" in query) and row[0] == "BAD":
             raise asyncpg.exceptions.NotNullViolationError("null value in column \"ts\" violates not-null constraint")
-        if "INSERT INTO trades(market_id, asset_id, ts, price, size_usd, side,\n" in query:
+        if "zleek_store_trade(" in query:
             self.trades.setdefault(row[8], row)
         elif "INSERT INTO trades" in query:
             self.ws_trades.append(row)

@@ -1,6 +1,6 @@
 # trades_archive: compressing trades (ROADMAP phase 4 step 4, storage)
 
-Status: design, 2026-11-16, for review. Nothing here is built yet.
+Status: built 2026-11-16 on branch phase4/storage-trades-archive (infra/sql/migrations/trades_archive.sql, trades_archive_enable.sql; tests test_trades_archive.sh; rehearsal rehearse_trades_archive.sh). Not yet rehearsed on a production dump, not deployed.
 
 ## Requirements (set by the human, 2026-11-16)
 
@@ -78,21 +78,24 @@ Normal operation never writes a trade older than 4 days, so `REST_QUERY`'s
 `ON CONFLICT (tx_hash)` against `trades` stays the dedupe. A write older than
 the cutoff (only the recovery script's `--apply` over an old window, or a
 future repair) must not create a second copy of a row that has been archived,
-so the writer routes it to `ARCHIVE_QUERY` instead:
+so every REST write goes through one database function, `zleek_store_trade`
+(the writer's `REST_QUERY` is now `SELECT zleek_store_trade($1..$13)`). It
+compares the trade's ts with `archive_cutoff()` (4 UTC days, the database's
+clock, the same function the move uses): newer, exactly the old upsert into
+`trades`; older, into `trades_archive` only if neither table holds the tx_hash:
 
 ```sql
-INSERT INTO trades_archive (...)
-SELECT $1, ... WHERE NOT EXISTS (
-    SELECT 1 FROM trades_archive a
-    WHERE a.market_id = $1 AND a.tx_hash = $9
-      AND a.ts BETWEEN $3 - interval '1 minute' AND $3 + interval '1 minute')
-  AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.tx_hash = $9);
+IF EXISTS (SELECT 1 FROM trades WHERE tx_hash = p_tx_hash)
+   OR EXISTS (SELECT 1 FROM trades_archive a
+              WHERE a.market_id IS NOT DISTINCT FROM p_market_id AND a.tx_hash = p_tx_hash
+                AND a.ts BETWEEN p_ts - interval '1 minute' AND p_ts + interval '1 minute')
+THEN RETURN 'duplicate';
 ```
 
 The `market_id` + `ts` window lets TimescaleDB decompress only that market's
 segment for one chunk (it can't use a tx_hash index on compressed data); the
-minute covers the websocket's 1-5 s offset. Old writes are single-threaded
-(the recovery script), so there is no race between the two checks. The
+minute covers the websocket's 1-5 s offset. A transaction-level advisory
+lock on the tx_hash serializes two writers of the same old trade. The
 recovery script's own "already stored" lookup reads both tables the same way.
 The price-only update that `REST_QUERY` does on conflict is not done for
 archived rows (they're past the backfill's reach; a repair updates them
@@ -119,25 +122,34 @@ they were, with a note that they predate the archive.
 
 ## Checks
 
-- Heartbeat: `trades` holds no row older than cutoff + 1 day (the move ran);
-  the archive job's last run succeeded within 26 h.
-- Heartbeat, cheap overlap check near the cutoff: no `tx_hash` in both tables
-  for `ts` in the 2 days either side of the cutoff (0 expected).
+- Heartbeat (`archive` check, only once trades_archive exists): `trades` holds
+  no row older than 5 UTC days (the move ran; this replaces a job_stats check,
+  which the read-only role may not see); no `tx_hash` in both tables within an
+  hour either side of the cutoff (where the websocket/Data API offset could
+  put one trade on both sides); no duplicate `tx_hash` in the newest archived
+  day (the permanent duplicate guard). Each query is indexed and bounded.
 - `storage-report.sql`: trades and trades_archive sizes, compressed chunks.
 
 ## Initial migration (production, once)
+
+Order matters: the readers switch to `trades_all` BEFORE any row moves, so the
+dashboard never loses history in between.
 
 1. Fresh manual backup, confirmed off-site (`OK … offsite=ok` in backup.log
    and `rclone check --size-only --one-way` against the bucket: 0
    differences), and the restore test, updated to count `trades_all` once the
    archive exists, passes on that dump (database ~5.8 GB: check the
    throwaway container has the disk for it).
-2. Create `trades_archive`, the view and the procedure (no job yet).
-3. Move the backlog **one day per transaction**, oldest first (from the oldest stored
-   day to the cutoff; ~2.6 GB on 2026-11-16), each with the same `DELETE ... RETURNING` statement.
-4. Compress the archive's chunks; deploy the worker and web changes (reads
-   via `trades_all`, `ARCHIVE_QUERY`); add the job.
-5. Give the space back to the OS: the moved rows leave ~2.6 GB of reusable
+2. `trades_archive.sql`: creates the archive, the view and the functions;
+   moves nothing, schedules nothing.
+3. Deploy the worker, web and heartbeat changes (they read through
+   `trades_all` and write through `zleek_store_trade`), with the usual
+   rollback tags.
+4. `CALL archive_trades_backlog()`: the backlog **one day per transaction**,
+   oldest first, up to the cutoff (~2.6 GB on 2026-11-16).
+5. Compress the archive's chunks older than 5 days; `trades_archive_enable.sql`
+   adds the compression policy and the 04:00 UTC job.
+6. Give the space back to the OS: the moved rows leave ~2.6 GB of reusable
    space inside `trades`. `VACUUM FULL trades` rewrites it (exclusive lock:
    the worker's writes wait, Redis buffers them) or the space is left to be
    reused by new rows. Decided after the rehearsal timing.
@@ -152,7 +164,7 @@ container (the production version) and run the migration exactly as above:
 - verify: row count and `count(DISTINCT tx_hash)` of trades_all equal the
   original trades; the dashboard queries return identical results before and
   after; `rebuild_bars` for a past day gives identical bars;
-- dedupe: write an archived trade again through `ARCHIVE_QUERY` (with the
+- dedupe: write an archived trade again through `zleek_store_trade` (with the
   websocket's ts and with the Data API's) and through the recovery script:
   0 rows added; a genuinely new old trade: 1 row added, into a compressed chunk;
 - inserts into **compressed** chunks on 2.31.0 (production's version): an
@@ -166,6 +178,24 @@ container (the production version) and run the migration exactly as above:
   decision.
 
 Only then plan the production run, with the rehearsal's timings.
+
+## Known TimescaleDB 2.31.0 bug: no tie-breaker with ORDER BY ... LIMIT on trades_all
+
+Found by the rehearsal on the 2026-11-17 production dump. A query on
+`trades_all` with `ORDER BY ts DESC, <another column> ... LIMIT n` fails with
+`ERROR: retrieved too many tuples in a bounded sort` once `trades_archive` has
+statistics (`ANALYZE`, which autovacuum runs): the planner puts an Incremental
+Sort (presorted on ts) over a Merge Append of trades and the archive's
+ChunkAppend, the ChunkAppend's per-chunk Sorts are bounded by the LIMIT, and
+tied timestamps make the Incremental Sort pull past that bound. Not affected:
+`ORDER BY ts DESC LIMIT n` (the web's recent-trades query), the same query on
+`trades_archive` alone, and ordered aggregates (`array_agg(... ORDER BY ts, id)`
+in the bars rebuild). Reproduced on 8 of 8 archived markets after `ANALYZE
+trades_archive`, 0 before. So: keep ORDER BY ... LIMIT on trades_all to `ts`
+alone (a comment in apps/web/lib/queries.ts says so); for a deterministic order
+among tied trades, select everything at or after the n-th newest ts and order
+inside an aggregate or in the application. Re-check after any TimescaleDB
+upgrade, and consider reporting it upstream (timescale/timescaledb).
 
 ## Websocket vs Data API timestamps
 
