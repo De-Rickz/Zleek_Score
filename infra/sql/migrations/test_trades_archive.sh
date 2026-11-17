@@ -121,3 +121,16 @@ echo "all $pass SQL checks passed ($IMAGE)"
 
 # The worker's own code against this database (apps/worker/tests/test_trades_archive_db.py).
 ZLEEK_TEST_DATABASE_URL="$URL" "$PYTHON" apps/worker/tests/test_trades_archive_db.py
+
+# Rollback path last (it undoes everything above): every archived row back
+# into trades, nothing lost, nothing doubled.
+total="$(q -c "SELECT count(*) FROM trades_all")"
+if q -c "CALL archive_trades_unarchive()" > /dev/null 2>&1; then echo "FAIL unarchive ran while the job was scheduled"; exit 1; fi
+echo "ok   unarchive refuses while archive_trades_job is scheduled"
+q -c "SELECT delete_job(job_id) FROM timescaledb_information.jobs WHERE proc_name = 'archive_trades_job'" > /dev/null
+q -c "CALL archive_trades_unarchive()" > /dev/null
+check "unarchive: archive empty" "0" "SELECT count(*) FROM trades_archive"
+check "unarchive: every row back in trades" "$total" "SELECT count(*) FROM trades"
+check "unarchive: tx_hash still unique" "$total" "SELECT count(DISTINCT tx_hash) FROM trades"
+echo "all rollback checks passed"
+

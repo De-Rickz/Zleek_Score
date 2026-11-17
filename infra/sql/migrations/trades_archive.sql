@@ -136,6 +136,37 @@ BEGIN
   END LOOP;
 END $$;
 
+-- ROLLBACK ONLY (docs/trades-archive-runbook.md): move every archived row back
+-- into trades, ONE UTC DAY PER TRANSACTION, newest first, so code that reads
+-- only trades sees full history again. Unschedule archive_trades_job first.
+-- A plain INSERT (no ON CONFLICT): a tx_hash already in trades aborts that day
+-- instead of silently dropping a row. Run outside a transaction block:
+--   CALL archive_trades_unarchive()
+CREATE OR REPLACE PROCEDURE archive_trades_unarchive()
+LANGUAGE plpgsql AS $$
+DECLARE d timestamptz; n bigint; t0 timestamptz;
+BEGIN
+  IF EXISTS (SELECT 1 FROM timescaledb_information.jobs WHERE proc_name = 'archive_trades_job') THEN
+    RAISE EXCEPTION 'archive_trades_job is still scheduled: unschedule it first (SELECT delete_job(job_id) FROM timescaledb_information.jobs WHERE proc_name = %)', quote_literal('archive_trades_job');
+  END IF;
+  SELECT date_trunc('day', max(ts)) INTO d FROM trades_archive;
+  WHILE d IS NOT NULL LOOP
+    t0 := clock_timestamp();
+    WITH back AS (
+      DELETE FROM trades_archive WHERE ts >= d AND ts < d + interval '1 day'
+      RETURNING id, market_id, asset_id, ts, price, size_usd, side, maker_wallet, taker_wallet,
+                tx_hash, raw, status, market_order_id, match_time)
+    INSERT INTO trades(id, market_id, asset_id, ts, price, size_usd, side, maker_wallet, taker_wallet,
+                       tx_hash, raw, status, market_order_id, match_time)
+    SELECT * FROM back;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    COMMIT;
+    RAISE NOTICE 'archive_trades_unarchive: % moved back % rows in % s', d::date, n,
+      round(extract(epoch FROM clock_timestamp() - t0)::numeric, 1);
+    SELECT date_trunc('day', max(ts)) INTO d FROM trades_archive;
+  END LOOP;
+END $$;
+
 -- The read-only role (web, heartbeat, ops queries) reads the archive and view.
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zleek_web') THEN
