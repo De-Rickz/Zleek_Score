@@ -41,7 +41,7 @@ end).
 ## Ready
 
 ### T1. Keep events when Redis is down (data loss)
-- **Status:** ready
+- **Status:** in review
 - **What:** `EliteZleekWriter.add_item` does a bare `redis.lpush`; when Redis
   is unreachable the trade or book event is lost (infra/TODO.md, "events are
   dropped while Redis is down"). Add a small bounded in-memory fallback buffer

@@ -16,6 +16,7 @@ logger = logging.getLogger("Ingestion.Writer")
 # insert row by row and move rows that can never be written to DEAD_LETTER_KEY,
 # so one bad row can't block every later flush.
 FLUSH_MAX_BATCH_FAILURES = 3
+FALLBACK_MAX_ITEMS = 50_000  # in-memory buffer while Redis is unreachable (oldest dropped first)
 DEAD_LETTER_KEY = "buffer:dead"
 # Errors that mean the row itself is bad (retrying can't help). Anything else
 # (connection lost, database down) keeps the row queued for the next flush.
@@ -84,7 +85,16 @@ class EliteZleekWriter:
         # Flush state: one flush at a time; consecutive whole-batch failures
         self._flush_lock = asyncio.Lock()
         self._batch_failures = 0
-        
+
+        # Fallback buffer for events that could not be pushed to Redis (Redis
+        # down or unreachable). Bounded: when full the oldest item is dropped
+        # and counted. Drained oldest-first once Redis answers, so queue order
+        # matches what it would have been.
+        self._fallback = deque()
+        self._fallback_lock = asyncio.Lock()
+        self.fallback_max = FALLBACK_MAX_ITEMS
+        self.fallback_dropped = 0
+
         # 📊 Telemetry
         self.write_lags = deque(maxlen=200)
         self.write_lag_counter = 0
@@ -159,7 +169,47 @@ class EliteZleekWriter:
             return
 
         # 3. Queueing
-        await self.redis.lpush(key, json.dumps(item, default=str))
+        await self._enqueue(key, json.dumps(item, default=str))
+
+    async def _enqueue(self, key, payload):
+        """LPUSH to Redis; on failure (or while older items are still waiting)
+        keep the item in the bounded in-memory fallback buffer."""
+        if not self._fallback:
+            try:
+                await self.redis.lpush(key, payload)
+                return
+            except Exception as e:
+                logger.warning("Redis push failed (%s: %s); buffering events in memory",
+                               type(e).__name__, e)
+        self._buffer(key, payload)
+        await self.drain_fallback()
+
+    def _buffer(self, key, payload):
+        if len(self._fallback) >= self.fallback_max:
+            self._fallback.popleft()
+            self.fallback_dropped += 1
+            if self.fallback_dropped == 1 or self.fallback_dropped % 1000 == 0:
+                logger.error("Redis fallback buffer full (%d items): dropped %d oldest event(s) so far",
+                             self.fallback_max, self.fallback_dropped)
+        self._fallback.append((key, payload))
+
+    async def drain_fallback(self):
+        """Push buffered items into Redis oldest first. Stops at the first
+        failure (the item stays buffered). Returns the number drained."""
+        drained = 0
+        async with self._fallback_lock:
+            while self._fallback:
+                key, payload = self._fallback[0]
+                try:
+                    await self.redis.lpush(key, payload)
+                except Exception:
+                    break
+                self._fallback.popleft()
+                drained += 1
+            if drained:
+                logger.info("Redis fallback: drained %d buffered event(s), %d left, %d dropped in total",
+                            drained, len(self._fallback), self.fallback_dropped)
+        return drained
 
     def _log_lag(self):
         self.write_lag_counter += 1
@@ -264,6 +314,7 @@ class EliteZleekWriter:
         while True:
             await asyncio.sleep(interval)
             try:
+                await self.drain_fallback()
                 await self.flush()
             except Exception as e:
                 logger.error(f"Flush error: {e}")
