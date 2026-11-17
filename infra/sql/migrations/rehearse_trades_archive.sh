@@ -92,7 +92,8 @@ fingerprint() {  # fingerprint TABLE: one line that changes if any reader's answ
                     (array_agg(price ORDER BY ts DESC, id DESC))[1] c, sum(size_usd) v, count(*) n
              FROM $t WHERE ts >= '$DAY' AND ts < '$DAY'::date + 1 GROUP BY 1, 2) s") "
     for m in $SAMPLE_MARKETS; do
-        out+="$m=$(q -c "SELECT md5(string_agg(ts::text || ':' || price::text || ':' || size_usd::text, ',' ORDER BY ts DESC)) FROM (SELECT ts, price, size_usd FROM $t WHERE market_id = '$m' ORDER BY ts DESC LIMIT 50) s") "
+        # ties broken by id: trades sharing a timestamp (same second) otherwise come back in plan-dependent order
+        out+="$m=$(q -c "SELECT md5(string_agg(id::text || ':' || ts::text || ':' || price::text || ':' || size_usd::text, ',' ORDER BY ts DESC, id DESC)) FROM (SELECT id, ts, price, size_usd FROM $t WHERE market_id = '$m' ORDER BY ts DESC, id DESC LIMIT 50) s") "
     done
     printf '%s' "$out"
 }
