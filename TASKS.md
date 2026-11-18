@@ -58,7 +58,7 @@ end).
   newest_stored_trade); stay out of those parts.
 
 ### T2. Redis persistence (small data-loss risk)
-- **Status:** in review
+- **Status:** in review (PR #7)
 - **What:** production Redis runs without persistence (infra/TODO.md). Add
   `--appendonly yes` to the redis command in docker-compose.prod.yml (data
   already persists to ./redis_data). The human applies it on the next Redis
