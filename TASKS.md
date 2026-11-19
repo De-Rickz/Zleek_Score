@@ -71,7 +71,7 @@ end).
   output in the PR.
 
 ### T3. Storage: retention and compression for the other time-series tables
-- **Status:** in review
+- **Status:** in review (PR #8)
 - **What:** the storage step's decided retention (docs/storage-plan.md,
   "Retention"): features_5m 30 days, signals_history 90 days, ob_snapshots 30
   days; bars_1m kept, compressed; 1-day chunks for new hypertables. Write a
