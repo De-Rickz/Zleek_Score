@@ -105,3 +105,24 @@ jobs:
         env:
           ZLEEK_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
           ZLEEK_TEST_PYTHON: python
+
+  storage-retention:
+    name: storage_retention integration (TimescaleDB 2.31.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.31.0-pg16   # production's version (docker-compose.prod.yml)
+        env:
+          POSTGRES_PASSWORD: test                   # throwaway service container, not a secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retention, compression and hypertable conversion
+        run: infra/sql/migrations/test_storage_retention.sh
+        env:
+          ZLEEK_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
