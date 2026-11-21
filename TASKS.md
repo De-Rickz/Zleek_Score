@@ -120,7 +120,7 @@ end).
   drop?), or the freshness design changes which markets the selections pick.
 
 ### T5. Log token-id parse failures in gamma_client
-- **Status:** ready
+- **Status:** in review
 - **What:** `parse_token_ids` (gamma_client.py, the `except Exception:` after
   `json.loads(raw_ids)`) swallows malformed `clobTokenIds`, and a list whose
   length isn't 2 falls through silently; the market can then never be mapped
