@@ -48,8 +48,17 @@ class MarketRow(BaseModel):
                     # is the reference outcome for named markets ("Team A" vs "Team B").
                     values["token_yes_id"] = ids[0]
                     values["token_no_id"] = ids[1]
-            except Exception:
-                pass
+                else:
+                    # Never mapped to a token: log it so it can be found.
+                    logger.warning(
+                        f"Market {values.get('id')}: clobTokenIds has {len(ids)} ids, "
+                        f"expected 2, so it can't be mapped: {raw_ids!r}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Market {values.get('id')}: can't parse clobTokenIds ({e!r}), "
+                    f"so it can't be mapped: {raw_ids!r}"
+                )
         return values
 
 # --- 2. The Async Fetcher ---
