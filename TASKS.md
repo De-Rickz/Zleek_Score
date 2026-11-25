@@ -93,7 +93,13 @@ end).
   older than its retention (grep the repo first; list what you found).
 
 ### T4. Storage: stop rewriting unchanged markets, and shrink markets.raw
-- **Status:** ready
+- **Status:** blocked: needs decision
+- **Decision needed:** the task's own condition is met. Evidence (grep of `raw->>`, `raw ?` across the repo):
+  - Read by running code: `apps/web/lib/queries.ts` (closed, acceptingOrders, endDate), `apps/worker/ingestion/writer.py` load_asset_ids and load_condition_ids_for_backfill (volume24hr), `scripts/recover_backfill_gap_2026-11.py` (volume24hr).
+  - Read only by one-off or repair scripts and checks: `clobTokenIds` (repair_token_columns_2026-10-30.sql, repair_trade_orientation_2026-10-30.sql, acceptance_price_orientation.sql, infra/backup/zleek-restore-test.sh); `endDate`, `closed`, `acceptingOrders`, `volume24hr` (stale-classify.sql, dashboard-classes.sql). CLAUDE.md requires repairs to recompute from raw, so trimming raw changes what those scripts can do.
+  - Options: (a) keep clobTokenIds, conditionId and the keys above in the trimmed raw, drop everything else (safest, still shrinks most of the ~7.3 KB); (b) trim to only keys read by running code and update the scripts to use the token columns; (c) leave raw untouched and only skip unchanged rows.
+  - Freshness: (1) a separate `refreshed_at` column, updated by one cheap batched `UPDATE ... WHERE id = ANY($1)` (needs a schema change, and the selections read it), or (2) touch `updated_at` only for rows older than ~1 h (no schema change, but still ~1 write per row per hour). Rounding volume24hr also changes selection ranking slightly.
+  - Recommendation: (a) with freshness option 2 first, since it needs no migration; take (1) later if write volume stays high.
 - **What:** the Gamma refresher rewrites all ~2,100 fetched markets every 10
   minutes with their full raw JSON (~7.3 KB), ~300,000 row versions a day
   (ROADMAP step 4; storage-plan). Every row differs between refreshes in
