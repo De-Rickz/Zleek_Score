@@ -132,7 +132,8 @@ end).
   `run_offline.sh`.
 
 ### T6. Gamma keyset pagination (markets past ~2,100 never refresh)
-- **Status:** ready
+- **Status:** blocked: needs decision
+- **Decision needed:** the keyset response shape is unverified and can't be recorded from the agent environment (gamma-api.polymarket.com was unreachable, curl HTTP 000, and a second request was denied by the session's permission check). Options: (a) the human records one read-only fixture, e.g. `curl 'https://gamma-api.polymarket.com/markets/keyset?active=true&closed=false&liquidity_num_min=10000&volume_num_min=1000&order=volume24hr&ascending=false&limit=2'` and `…&limit=100` plus the next-cursor page, into apps/worker/tests/fixtures/, then T6 goes back to `ready`; (b) allow the agent environment network access to gamma-api.polymarket.com; (c) implement from the docs alone with a guessed cursor field name (not recommended: a wrong guess ends the fetch silently at the first page).
 - **What:** fetch_markets pages by offset and Gamma rejects offset >= 2100
   with 422 "use /markets/keyset" (infra/TODO.md; the 422 also shows in every
   worker log). Switch to keyset pagination with the same filters and order
