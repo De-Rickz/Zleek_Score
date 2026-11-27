@@ -25,6 +25,12 @@ Never writes anything. Database access uses a read-only transaction.
     DATABASE_URL=<zleek_web url> .venv/bin/python scripts/check_multifill_collisions.py \
         [--log ingestion/worker.log] [--markets 5]
 
+On the server the worker logs to docker, not to a file. Pipe the logs in with
+`--log -` (docker's "worker-1  | <timestamp> " line prefixes are stripped):
+
+    docker compose -f docker-compose.prod.yml logs --no-color worker | \
+        python scripts/check_multifill_collisions.py --log -
+
 Exits 1 if any collision is found, 0 if clean.
 """
 import argparse
@@ -44,6 +50,10 @@ EVENT_RE = re.compile(r"(\{'market':.*'event_type': 'last_trade_price'.*\})\s*$"
 # Live prices carry float noise (~1e-17), and the Data API reports the same fill's
 # price to more decimals than the websocket (diffs up to ~1e-7). Real price
 # differences are at least one tick (0.001).
+# "worker-1  | " (docker compose logs), optionally followed by the RFC3339
+# timestamp that `--timestamps` adds.
+DOCKER_PREFIX_RE = re.compile(
+    r"^\s*[\w.-]+\s*\|\s*(?:\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?\s+)?")
 PRICE_TOLERANCE = Decimal("1e-6")
 
 
@@ -62,25 +72,38 @@ def report(title, by_hash):
     return len(collisions)
 
 
+def strip_docker_prefix(line):
+    return DOCKER_PREFIX_RE.sub("", line, count=1)
+
+
+def parse_log_lines(lines):
+    """transaction_hash -> set of distinct fills, from worker.log or docker log lines."""
+    by_hash = collections.defaultdict(set)
+    for line in lines:
+        if "last_trade_price" not in line:
+            continue
+        m = EVENT_RE.search(strip_docker_prefix(line))
+        if not m:
+            continue
+        try:
+            ev = ast.literal_eval(m.group(1))
+        except (ValueError, SyntaxError):
+            continue
+        h = ev.get("transaction_hash")
+        if h:
+            by_hash[h].add(fill_key(ev.get("asset_id"), ev.get("size", 0), ev.get("price", 0)))
+    return by_hash
+
+
 def check_log(path):
+    if path == "-":
+        by_hash = parse_log_lines(sys.stdin)
+        return report("1. worker log live events (stdin)", by_hash)
     if not os.path.exists(path):
         print(f"\n[skipped] worker.log not found at {path}")
         return 0
-    by_hash = collections.defaultdict(set)
     with open(path, errors="replace") as f:
-        for line in f:
-            if "last_trade_price" not in line:
-                continue
-            m = EVENT_RE.search(line)
-            if not m:
-                continue
-            try:
-                ev = ast.literal_eval(m.group(1))
-            except (ValueError, SyntaxError):
-                continue
-            h = ev.get("transaction_hash")
-            if h:
-                by_hash[h].add(fill_key(ev.get("asset_id"), ev.get("size", 0), ev.get("price", 0)))
+        by_hash = parse_log_lines(f)
     return report("1. worker.log live events", by_hash)
 
 
@@ -147,7 +170,7 @@ async def main(args):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--log", default=os.path.join(os.path.dirname(__file__), "..", "ingestion", "worker.log"))
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--log", help="worker.log path, or - for stdin (docker logs)", default=os.path.join(os.path.dirname(__file__), "..", "ingestion", "worker.log"))
     p.add_argument("--markets", type=int, default=5)
     sys.exit(asyncio.run(main(p.parse_args())))
