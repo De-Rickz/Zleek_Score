@@ -149,7 +149,7 @@ end).
   than ~2x): the refresher's cost changes.
 
 ### T7. Multi-fill check reads docker logs
-- **Status:** in review
+- **Status:** in review (PR #12)
 - **What:** apps/worker/scripts/check_multifill_collisions.py Check 1 reads
   ingestion/worker.log, which doesn't exist on the server; there the worker
   logs to docker (`docker compose -f docker-compose.prod.yml logs worker`)
